@@ -1,25 +1,55 @@
 import os
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import requests
 from flask import Flask, jsonify, request, render_template_string
 
 
+# ============================================================
+# APP
+# ============================================================
+
 app = Flask(__name__)
+
+
+# ============================================================
+# VIETNAM TIME UTC + 7
+# ============================================================
+
+VN_TZ = timezone(
+    timedelta(hours=7)
+)
+
+
+def get_vietnam_time():
+
+    return datetime.now(VN_TZ)
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
+BOT_TOKEN = os.environ.get(
+    "BOT_TOKEN",
+    ""
+)
+
+CHAT_ID = os.environ.get(
+    "CHAT_ID",
+    ""
+)
+
 
 # Client gửi heartbeat mỗi 10 giây
-# Quá 30 giây không nhận được -> OFFLINE
+HEARTBEAT_INTERVAL = 10
+
+
+# Quá 30 giây không nhận heartbeat -> OFFLINE
 OFFLINE_TIMEOUT = 30
+
 
 # Server kiểm tra mỗi 5 giây
 CHECK_INTERVAL = 5
@@ -40,7 +70,10 @@ def send_telegram(message):
 
     if not BOT_TOKEN or not CHAT_ID:
 
-        print("❌ BOT_TOKEN hoặc CHAT_ID chưa được cấu hình")
+        print(
+            "❌ BOT_TOKEN hoặc CHAT_ID "
+            "chưa được cấu hình"
+        )
 
         return False
 
@@ -56,11 +89,15 @@ def send_telegram(message):
             url,
 
             json={
+
                 "chat_id": CHAT_ID,
+
                 "text": message
+
             },
 
             timeout=15
+
         )
 
         print(
@@ -71,10 +108,11 @@ def send_telegram(message):
 
         return response.ok
 
+
     except Exception as ex:
 
         print(
-            "❌ Telegram Error:",
+            "❌ TELEGRAM ERROR:",
             ex
         )
 
@@ -82,10 +120,13 @@ def send_telegram(message):
 
 
 # ============================================================
-# HEARTBEAT
+# HEARTBEAT API
 # ============================================================
 
-@app.route("/heartbeat", methods=["POST"])
+@app.route(
+    "/heartbeat",
+    methods=["POST"]
+)
 def heartbeat():
 
     data = request.get_json(
@@ -98,40 +139,50 @@ def heartbeat():
         "Unknown"
     )
 
+
     public_ip = data.get(
         "public_ip",
         "Unknown"
     )
 
 
-    now = datetime.now()
+    # Giờ Việt Nam
+    now = get_vietnam_time()
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # MÁY CHƯA TỒN TẠI
-    # --------------------------------------------------------
+    # ========================================================
 
     if machine_name not in machines:
 
+
         machines[machine_name] = {
 
-            "last_seen": now,
+            "last_seen":
+                now,
 
-            "online": True,
+            "online":
+                True,
 
-            "public_ip": public_ip,
+            "public_ip":
+                public_ip,
 
-            "offline_alert_sent": False
+            "offline_alert_sent":
+                False
 
         }
 
 
         print(
+
             f"🟢 NEW MACHINE: "
             f"{machine_name}"
+
         )
 
 
+        # Gửi thông báo máy online lần đầu
         send_telegram(
 
             f"🟢 MÁY ĐÃ ONLINE\n\n"
@@ -150,22 +201,46 @@ def heartbeat():
 
     else:
 
+
         machine = machines[
             machine_name
         ]
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # OFFLINE -> ONLINE
-        # ----------------------------------------------------
+        # ====================================================
 
         if not machine["online"]:
 
-            machine["online"] = True
+
+            offline_time = int(
+
+                (
+                    now
+                    -
+                    machine["last_seen"]
+                ).total_seconds()
+
+            )
+
+
+            machine[
+                "online"
+            ] = True
+
 
             machine[
                 "offline_alert_sent"
             ] = False
+
+
+            print(
+
+                f"🟢 MACHINE BACK ONLINE: "
+                f"{machine_name}"
+
+            )
 
 
             send_telegram(
@@ -178,71 +253,98 @@ def heartbeat():
                 f"🌐 Public IP:\n"
                 f"{public_ip}\n\n"
 
-                f"🕒 Thời gian:\n"
+                f"⏱️ Thời gian mất kết nối:\n"
+                f"{offline_time} giây\n\n"
+
+                f"🕒 Có mạng lại:\n"
                 f"{now.strftime('%Y-%m-%d %H:%M:%S')}"
 
             )
 
 
-        machine["last_seen"] = now
+        # ====================================================
+        # UPDATE HEARTBEAT
+        # ====================================================
 
-        machine["public_ip"] = public_ip
+        machine[
+            "last_seen"
+        ] = now
+
+
+        machine[
+            "public_ip"
+        ] = public_ip
 
 
     return jsonify({
 
-        "status": "OK",
+        "status":
+            "OK",
 
-        "machine": machine_name,
+        "machine":
+            machine_name,
 
-        "time": now.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        "time":
+            now.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
 
     })
 
 
 # ============================================================
-# API STATUS
+# STATUS API
 # ============================================================
 
-@app.route("/api/status", methods=["GET"])
+@app.route(
+    "/api/status",
+    methods=["GET"]
+)
 def api_status():
 
     result = {}
 
-    now = datetime.now()
+
+    now = get_vietnam_time()
 
 
-    for name, machine in machines.items():
+    for (
+        name,
+        machine
+    ) in machines.items():
+
 
         seconds = int(
 
             (
+
                 now
+
                 -
-                machine["last_seen"]
+
+                machine[
+                    "last_seen"
+                ]
+
             ).total_seconds()
 
         )
 
 
-        status = (
+        if machine["online"]:
 
-            "ONLINE"
+            status = "ONLINE"
 
-            if machine["online"]
+        else:
 
-            else
-
-            "OFFLINE"
-
-        )
+            status = "OFFLINE"
 
 
         result[name] = {
 
-            "status": status,
+            "status":
+                status,
+
 
             "last_seen":
 
@@ -252,9 +354,10 @@ def api_status():
                     "%Y-%m-%d %H:%M:%S"
                 ),
 
-            "seconds_since_last_heartbeat":
 
+            "seconds_since_last_heartbeat":
                 seconds,
+
 
             "public_ip":
 
@@ -267,9 +370,17 @@ def api_status():
 
     return jsonify({
 
-        "server": "RUNNING",
+        "server":
+            "RUNNING",
 
-        "machines": result
+        "time":
+
+            now.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+
+        "machines":
+            result
 
     })
 
@@ -280,20 +391,30 @@ def api_status():
 
 def watchdog():
 
-    print("🐕 WATCHDOG STARTED")
+    print(
+        "🐕 WATCHDOG STARTED"
+    )
+
 
     while True:
 
+
         try:
 
-            now = datetime.now()
+
+            # Giờ Việt Nam
+            now = get_vietnam_time()
 
 
             for (
+
                 machine_name,
                 machine
+
             ) in list(
+
                 machines.items()
+
             ):
 
 
@@ -314,9 +435,9 @@ def watchdog():
                 )
 
 
-                # ------------------------------------------------
+                # ============================================
                 # QUÁ 30 GIÂY KHÔNG CÓ HEARTBEAT
-                # ------------------------------------------------
+                # ============================================
 
                 if (
 
@@ -370,6 +491,9 @@ def watchdog():
                         f"🕒 Lần cuối Online:\n"
                         f"{last_seen.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
+                        f"🕒 Phát hiện Offline:\n"
+                        f"{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+
                         f"⚠️ Có thể do:\n"
                         f"• Mất Internet\n"
                         f"• Tắt Wi-Fi/LAN\n"
@@ -381,9 +505,12 @@ def watchdog():
 
         except Exception as ex:
 
+
             print(
+
                 "❌ WATCHDOG ERROR:",
                 ex
+
             )
 
 
@@ -396,14 +523,19 @@ def watchdog():
 # DASHBOARD
 # ============================================================
 
-@app.route("/", methods=["GET"])
+@app.route(
+    "/",
+    methods=["GET"]
+)
 def dashboard():
 
-    return render_template_string("""
+    return render_template_string(
+
+        """
 
 <!DOCTYPE html>
 
-<html>
+<html lang="vi">
 
 <head>
 
@@ -414,19 +546,33 @@ def dashboard():
     content="width=device-width, initial-scale=1.0"
 >
 
-<title>Network Monitor</title>
+<title>
+Network Monitor
+</title>
+
 
 <style>
 
+* {
+
+    box-sizing:
+        border-box;
+
+}
+
+
 body {
 
-    margin: 0;
+    margin:
+        0;
 
     font-family:
+
         Arial,
         sans-serif;
 
     background:
+
         #f3f4f6;
 
 }
@@ -435,18 +581,23 @@ body {
 header {
 
     background:
+
         #111827;
 
     color:
+
         white;
 
     padding:
+
         20px;
 
     font-size:
+
         24px;
 
     font-weight:
+
         bold;
 
 }
@@ -455,12 +606,15 @@ header {
 .container {
 
     max-width:
-        1100px;
+
+        1200px;
 
     margin:
+
         auto;
 
     padding:
+
         30px;
 
 }
@@ -469,15 +623,18 @@ header {
 .grid {
 
     display:
+
         grid;
 
     grid-template-columns:
+
         repeat(
             auto-fit,
             minmax(300px, 1fr)
         );
 
     gap:
+
         20px;
 
 }
@@ -486,15 +643,19 @@ header {
 .card {
 
     background:
+
         white;
 
     border-radius:
+
         15px;
 
     padding:
+
         25px;
 
     box-shadow:
+
         0 4px 15px
         rgba(0,0,0,.08);
 
@@ -504,7 +665,8 @@ header {
 .online {
 
     border-left:
-        6px solid green;
+
+        7px solid green;
 
 }
 
@@ -512,7 +674,8 @@ header {
 .offline {
 
     border-left:
-        6px solid red;
+
+        7px solid red;
 
 }
 
@@ -520,19 +683,35 @@ header {
 .status {
 
     font-size:
+
         20px;
 
     font-weight:
+
         bold;
 
 }
 
 
+.time {
+
+    color:
+
+        #666;
+
+    margin-bottom:
+
+        20px;
+
+}
+
 </style>
 
 </head>
 
+
 <body>
+
 
 <header>
 
@@ -543,6 +722,17 @@ header {
 
 <div class="container">
 
+
+    <h3
+        id="serverTime"
+        class="time"
+    >
+
+        Loading...
+
+    </h3>
+
+
     <div
         class="grid"
         id="machines"
@@ -552,41 +742,71 @@ header {
 
     </div>
 
+
 </div>
 
 
 <script>
 
+
 async function loadData() {
+
 
     try {
 
+
         const response =
+
             await fetch(
                 "/api/status"
             );
 
+
         const data =
+
             await response.json();
 
+
         const machines =
+
             data.machines;
+
+
+        document.getElementById(
+            "serverTime"
+        ).innerHTML =
+
+            "🕒 Giờ Việt Nam: "
+            +
+            data.time;
+
 
         let html = "";
 
 
         for (
+
             const name
-            in machines
+
+            in
+
+            machines
+
         ) {
 
+
             const machine =
+
                 machines[name];
 
+
             const status =
+
                 machine.status;
 
+
             const css =
+
                 status === "ONLINE"
 
                 ?
@@ -607,14 +827,21 @@ async function loadData() {
                 "
             >
 
+
                 <h2>
+
                     🖥️ ${name}
+
                 </h2>
+
 
                 <p
                     class="status"
                 >
-                    ${status === "ONLINE"
+
+                    ${
+
+                        status === "ONLINE"
 
                         ?
 
@@ -623,24 +850,40 @@ async function loadData() {
                         :
 
                         "🔴 OFFLINE"
+
                     }
+
                 </p>
 
+
                 <p>
-                    🌐 IP:
+
+                    🌐 Public IP:
+
                     ${machine.public_ip}
+
                 </p>
 
+
                 <p>
+
                     🕒 Last Seen:
+
                     ${machine.last_seen}
+
                 </p>
 
+
                 <p>
+
                     ⏱️
+
                     ${machine.seconds_since_last_heartbeat}
-                    seconds ago
+
+                    giây trước
+
                 </p>
+
 
             </div>
 
@@ -650,11 +893,15 @@ async function loadData() {
 
 
         if (
+
             html === ""
+
         ) {
 
+
             html =
-                "<h2>Chưa có máy nào kết nối</h2>";
+
+                "<h2>⚠️ Chưa có máy nào kết nối</h2>";
 
         }
 
@@ -662,20 +909,23 @@ async function loadData() {
         document.getElementById(
             "machines"
         ).innerHTML =
+
             html;
 
 
     }
 
-    catch (
-        error
-    ) {
+
+    catch (error) {
+
 
         console.log(
             error
         );
 
+
     }
+
 
 }
 
@@ -691,13 +941,17 @@ setInterval(
 
 );
 
+
 </script>
+
 
 </body>
 
 </html>
 
-""")
+        """
+
+    )
 
 
 # ============================================================
@@ -719,11 +973,15 @@ threading.Thread(
 
 if __name__ == "__main__":
 
+
     port = int(
 
         os.environ.get(
+
             "PORT",
+
             10000
+
         )
 
     )
