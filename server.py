@@ -25,9 +25,9 @@ CHECK_INTERVAL = 1
 # TELEGRAM CONFIG
 # ============================================================
 
-BOT_TOKEN = "BOT_TOKEN_CUA_BAN"
+BOT_TOKEN = "8508756103:AAGBFPaboWOaIxaCOf-W46PRBoeSDyiDcZ4"
 
-CHAT_ID = "CHAT_ID_CUA_BAN"
+CHAT_ID = "6149566675"
 
 
 # ============================================================
