@@ -1,1708 +1,212 @@
-import os
-import time
-import threading
-from datetime import datetime, timezone, timedelta
-
-import requests
 from flask import Flask, jsonify, request, render_template_string
-
-
-# ============================================================
-# FLASK
-# ============================================================
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+import os
+import requests
 
 app = Flask(__name__)
-
-
-# ============================================================
-# VIETNAM TIME
-# ============================================================
-
-VIETNAM_TZ = timezone(timedelta(hours=7))
-
-
-def vietnam_now():
-    return datetime.now(VIETNAM_TZ)
-
-
-def format_time(dt):
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
-
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = os.environ.get(
-    "BOT_TOKEN",
-    ""
-).strip()
-
-CHAT_ID = os.environ.get(
-    "CHAT_ID",
-    ""
-).strip()
-
-
-# Client heartbeat:
-# 10 seconds
-
-HEARTBEAT_INTERVAL = 10
-
-
-# Không nhận heartbeat 30 giây
-# => OFFLINE
-
 OFFLINE_TIMEOUT = 30
 
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
 
-# Watchdog kiểm tra mỗi 1 giây
-
-CHECK_INTERVAL = 1
-
-
-# ============================================================
-# MACHINE DATA
-# ============================================================
-
+# Lưu thông tin máy
 machines = {}
 
+# Lock tránh lỗi khi nhiều request cùng truy cập
 machines_lock = threading.Lock()
 
-
-# ============================================================
-# TELEGRAM STATUS
-# ============================================================
-
-telegram_status = {
-
-    "sent": False,
-
-    "last_time": None,
-
-    "last_type": None,
-
-    "last_machine": None,
-
-    "last_error": None
-
-}
+# Giờ Việt Nam UTC + 7
+VN_TZ = timezone(timedelta(hours=7))
 
 
 # ============================================================
-# TELEGRAM SEND
+# TIME
 # ============================================================
 
-def send_telegram(message, event_type="", machine_name=""):
-
-    global telegram_status
-
-
-    # --------------------------------------------------------
-    # Không có BOT TOKEN
-    # --------------------------------------------------------
-
-    if not BOT_TOKEN:
-
-        telegram_status.update({
-
-            "sent": False,
-
-            "last_time": format_time(
-                vietnam_now()
-            ),
-
-            "last_type": event_type,
-
-            "last_machine": machine_name,
-
-            "last_error":
-                "BOT_TOKEN chưa được cấu hình"
-
-        })
-
-        return False
+def vn_now():
+    return datetime.now(VN_TZ)
 
 
-    # --------------------------------------------------------
-    # Không có CHAT ID
-    # --------------------------------------------------------
+def vn_time_string():
+    return vn_now().strftime("%Y-%m-%d %H:%M:%S")
 
-    if not CHAT_ID:
 
-        telegram_status.update({
+# ============================================================
+# TELEGRAM
+# ============================================================
 
-            "sent": False,
+def telegram_configured():
+    return bool(BOT_TOKEN and CHAT_ID)
 
-            "last_time": format_time(
-                vietnam_now()
-            ),
 
-            "last_type": event_type,
+def send_telegram(message):
+    """
+    Gửi tin nhắn Telegram.
+    Không làm crash server nếu Telegram lỗi.
+    """
 
-            "last_machine": machine_name,
-
-            "last_error":
-                "CHAT_ID chưa được cấu hình"
-
-        })
-
-        return False
-
+    if not telegram_configured():
+        return False, "BOT_TOKEN hoặc CHAT_ID chưa cấu hình"
 
     try:
 
-        url = (
-            "https://api.telegram.org/"
-            f"bot{BOT_TOKEN}/sendMessage"
-        )
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
+        data = {
+            "chat_id": CHAT_ID,
+            "text": message
+        }
 
         response = requests.post(
-
             url,
-
-            json={
-
-                "chat_id": CHAT_ID,
-
-                "text": message
-
-            },
-
+            json=data,
             timeout=15
-
         )
 
+        result = response.json()
 
-        now_text = format_time(
-            vietnam_now()
-        )
+        if response.status_code == 200 and result.get("ok"):
 
+            return True, "Telegram gửi thành công"
 
-        # ----------------------------------------------------
-        # SUCCESS
-        # ----------------------------------------------------
+        return False, str(result)
 
-        if response.ok:
+    except Exception as e:
 
-            telegram_status.update({
-
-                "sent": True,
-
-                "last_time": now_text,
-
-                "last_type": event_type,
-
-                "last_machine": machine_name,
-
-                "last_error": None
-
-            })
-
-            print(
-                f"Telegram OK: "
-                f"{event_type} - "
-                f"{machine_name}"
-            )
-
-            return True
+        return False, str(e)
 
 
-        # ----------------------------------------------------
-        # ERROR
-        # ----------------------------------------------------
+# ============================================================
+# FORMAT TELEGRAM
+# ============================================================
 
-        error_text = (
-            f"HTTP {response.status_code}: "
-            f"{response.text[:300]}"
-        )
+def telegram_online_message(machine_name, public_ip):
 
+    return f"""🟢 MÁY ĐÃ ONLINE
 
-        telegram_status.update({
+🖥️ Máy:
+{machine_name}
 
-            "sent": False,
+🌐 Public IP:
+{public_ip}
 
-            "last_time": now_text,
-
-            "last_type": event_type,
-
-            "last_machine": machine_name,
-
-            "last_error": error_text
-
-        })
+🕒 Thời gian:
+{vn_time_string()}"""
 
 
-        print(
-            "Telegram ERROR:",
-            error_text
-        )
+def telegram_offline_message(machine_name, public_ip, last_seen):
 
+    return f"""🔴 MÁY ĐÃ OFFLINE
 
-        return False
+🖥️ Máy:
+{machine_name}
 
+🌐 Public IP:
+{public_ip}
 
-    except Exception as ex:
+🕒 Last Seen:
+{last_seen}
 
-        now_text = format_time(
-            vietnam_now()
-        )
+⏱️ Offline timeout:
+{OFFLINE_TIMEOUT} giây
 
-
-        telegram_status.update({
-
-            "sent": False,
-
-            "last_time": now_text,
-
-            "last_type": event_type,
-
-            "last_machine": machine_name,
-
-            "last_error": str(ex)
-
-        })
-
-
-        print(
-            "Telegram ERROR:",
-            ex
-        )
-
-
-        return False
+📅 Thời gian phát hiện:
+{vn_time_string()}"""
 
 
 # ============================================================
 # HEARTBEAT
 # ============================================================
 
-@app.route(
-    "/heartbeat",
-    methods=["POST"]
-)
+@app.route("/heartbeat", methods=["POST"])
 def heartbeat():
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+    data = request.get_json(silent=True)
 
+    if not data:
+        data = request.form.to_dict()
 
-    machine_name = str(
-
-        data.get(
-            "machine_name",
-            "Unknown"
-        )
-
-    ).strip()
-
-
-    public_ip = str(
-
-        data.get(
-            "public_ip",
-            "Unknown"
-        )
-
-    ).strip()
-
+    machine_name = data.get("machine")
 
     if not machine_name:
+        machine_name = request.headers.get("X-Machine-Name")
 
-        machine_name = "Unknown"
+    if not machine_name:
+        return jsonify({
+            "status": "ERROR",
+            "message": "machine is required"
+        }), 400
 
+    machine_name = str(machine_name).strip().upper()
 
-    now = vietnam_now()
+    public_ip = data.get("public_ip", "")
 
+    if not public_ip:
+        public_ip = request.remote_addr
 
-    telegram_message = None
+    current_time = vn_now()
 
-    telegram_event = ""
-
+    need_send_online = False
 
     with machines_lock:
 
-        # ====================================================
-        # NEW MACHINE
-        # ====================================================
-
+        # Máy chưa tồn tại
         if machine_name not in machines:
 
             machines[machine_name] = {
-
-                "last_seen": now,
-
-                "online": True,
-
-                "public_ip":
-                    public_ip,
-
-                "offline_since":
-                    None,
-
-                "telegram_sent":
-                    False,
-
-                "telegram_time":
-                    None,
-
-                "telegram_event":
-                    None,
-
-                "telegram_error":
-                    None
-
+                "last_seen": current_time,
+                "public_ip": public_ip,
+                "status": "ONLINE",
+                "telegram_online_sent": False,
+                "telegram_offline_sent": False
             }
 
-
-            telegram_message = (
-
-                "🟢 MÁY ĐÃ ONLINE\n\n"
-
-                f"🖥️ Máy:\n"
-                f"{machine_name}\n\n"
-
-                f"🌐 Public IP:\n"
-                f"{public_ip}\n\n"
-
-                f"🕒 Thời gian:\n"
-                f"{format_time(now)}"
-
-            )
-
-
-            telegram_event = "ONLINE"
-
+            need_send_online = True
 
         else:
 
-            machine = machines[
-                machine_name
-            ]
+            machine = machines[machine_name]
 
+            old_status = machine.get("status", "OFFLINE")
 
-            # =================================================
-            # OFFLINE -> ONLINE
-            # =================================================
-
-            if not machine["online"]:
-
-                offline_since = (
-                    machine.get(
-                        "offline_since"
-                    )
-                )
-
-
-                if offline_since:
-
-                    offline_seconds = int(
-
-                        (
-                            now
-                            -
-                            offline_since
-                        ).total_seconds()
-
-                    )
-
-                else:
-
-                    offline_seconds = 0
-
-
-                machine["online"] = True
-
-                machine[
-                    "offline_since"
-                ] = None
-
-
-                telegram_message = (
-
-                    "🟢 MÁY ĐÃ KẾT NỐI LẠI\n\n"
-
-                    f"🖥️ Máy:\n"
-                    f"{machine_name}\n\n"
-
-                    f"🌐 Public IP:\n"
-                    f"{public_ip}\n\n"
-
-                    f"🔴 Mất mạng từ:\n"
-                    f"{format_time(offline_since) if offline_since else 'Unknown'}\n\n"
-
-                    f"🟢 Có mạng lại:\n"
-                    f"{format_time(now)}\n\n"
-
-                    f"⏱️ Thời gian mất mạng:\n"
-                    f"{offline_seconds} giây"
-
-                )
-
-
-                telegram_event = "ONLINE_AGAIN"
-
-
-            # =================================================
-            # NORMAL HEARTBEAT
-            # =================================================
-
-            machine["last_seen"] = now
-
+            machine["last_seen"] = current_time
             machine["public_ip"] = public_ip
+            machine["status"] = "ONLINE"
 
+            # Nếu trước đó OFFLINE
+            # bây giờ heartbeat lại => ONLINE
+            if old_status == "OFFLINE":
 
-    # ========================================================
-    # SEND TELEGRAM
-    # ========================================================
+                need_send_online = True
 
-    if telegram_message:
+                machine["telegram_offline_sent"] = False
 
-        success = send_telegram(
+        if need_send_online:
 
-            telegram_message,
+            machines[machine_name]["telegram_online_sent"] = True
 
-            telegram_event,
+    # Gửi Telegram ngoài lock
+    if need_send_online:
 
-            machine_name
-
+        send_telegram(
+            telegram_online_message(
+                machine_name,
+                public_ip
+            )
         )
 
-
-        # ----------------------------------------------------
-        # Lưu trạng thái Telegram vào máy
-        # ----------------------------------------------------
-
-        with machines_lock:
-
-            machine = machines[
-                machine_name
-            ]
-
-
-            machine[
-                "telegram_sent"
-            ] = success
-
-
-            machine[
-                "telegram_time"
-            ] = format_time(
-                vietnam_now()
-            )
-
-
-            machine[
-                "telegram_event"
-            ] = telegram_event
-
-
-            machine[
-                "telegram_error"
-            ] = (
-                None
-                if success
-                else telegram_status[
-                    "last_error"
-                ]
-            )
-
-
     return jsonify({
-
         "status": "OK",
-
-        "machine":
-            machine_name,
-
-        "time":
-            format_time(now)
-
+        "machine": machine_name,
+        "time": vn_time_string()
     })
-
-
-# ============================================================
-# API STATUS
-# ============================================================
-
-@app.route(
-    "/api/status",
-    methods=["GET"]
-)
-def api_status():
-
-    now = vietnam_now()
-
-    result = {}
-
-
-    with machines_lock:
-
-        for name, machine in machines.items():
-
-            seconds = int(
-
-                (
-                    now
-                    -
-                    machine["last_seen"]
-                ).total_seconds()
-
-            )
-
-
-            if seconds >= OFFLINE_TIMEOUT:
-
-                status = "OFFLINE"
-
-            else:
-
-                status = "ONLINE"
-
-
-            result[name] = {
-
-                "status":
-                    status,
-
-                "last_seen":
-                    format_time(
-                        machine["last_seen"]
-                    ),
-
-                "seconds_since_last_heartbeat":
-                    seconds,
-
-                "public_ip":
-                    machine["public_ip"],
-
-                "telegram_sent":
-                    machine.get(
-                        "telegram_sent",
-                        False
-                    ),
-
-                "telegram_time":
-                    machine.get(
-                        "telegram_time"
-                    ),
-
-                "telegram_event":
-                    machine.get(
-                        "telegram_event"
-                    ),
-
-                "telegram_error":
-                    machine.get(
-                        "telegram_error"
-                    )
-
-            }
-
-
-    return jsonify({
-
-        "server":
-            "RUNNING",
-
-        "time":
-            format_time(now),
-
-        "offline_timeout":
-            OFFLINE_TIMEOUT,
-
-        "telegram": {
-
-            "configured":
-                bool(
-                    BOT_TOKEN
-                )
-                and
-                bool(
-                    CHAT_ID
-                ),
-
-            "sent":
-                telegram_status[
-                    "sent"
-                ],
-
-            "last_time":
-                telegram_status[
-                    "last_time"
-                ],
-
-            "last_type":
-                telegram_status[
-                    "last_type"
-                ],
-
-            "last_machine":
-                telegram_status[
-                    "last_machine"
-                ],
-
-            "last_error":
-                telegram_status[
-                    "last_error"
-                ]
-
-        },
-
-        "machines":
-            result
-
-    })
-
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
-@app.route(
-    "/",
-    methods=["GET"]
-)
-def dashboard():
-
-    return render_template_string(
-        r"""
-<!DOCTYPE html>
-
-<html lang="vi">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-    name="viewport"
-    content="
-        width=device-width,
-        initial-scale=1.0
-    "
->
-
-<title>
-NETWORK MONITOR
-</title>
-
-
-<style>
-
-* {
-
-    box-sizing:
-        border-box;
-
-}
-
-
-body {
-
-    margin:
-        0;
-
-    font-family:
-        Arial,
-        Helvetica,
-        sans-serif;
-
-    background:
-        #f1f5f9;
-
-    color:
-        #111827;
-
-}
-
-
-/* =========================================================
-   HEADER
-   ========================================================= */
-
-.header {
-
-    background:
-        #0f172a;
-
-    color:
-        white;
-
-    padding:
-        30px 25px;
-
-    font-size:
-        30px;
-
-    font-weight:
-        bold;
-
-}
-
-
-.header span {
-
-    font-size:
-        28px;
-
-}
-
-
-/* =========================================================
-   CONTAINER
-   ========================================================= */
-
-.container {
-
-    max-width:
-        1200px;
-
-    margin:
-        auto;
-
-    padding:
-        25px;
-
-}
-
-
-/* =========================================================
-   SERVER
-   ========================================================= */
-
-.server-box {
-
-    background:
-        white;
-
-    border-radius:
-        18px;
-
-    padding:
-        22px;
-
-    margin-bottom:
-        25px;
-
-    box-shadow:
-        0 5px 20px
-        rgba(
-            0,
-            0,
-            0,
-            .08
-        );
-
-}
-
-
-.server-title {
-
-    font-size:
-        20px;
-
-    font-weight:
-        bold;
-
-    margin-bottom:
-        12px;
-
-}
-
-
-.server-line {
-
-    margin:
-        8px 0;
-
-}
-
-
-/* =========================================================
-   MACHINE GRID
-   ========================================================= */
-
-.machine-grid {
-
-    display:
-        grid;
-
-    grid-template-columns:
-        repeat(
-            auto-fit,
-            minmax(
-                320px,
-                1fr
-            )
-        );
-
-    gap:
-        22px;
-
-}
-
-
-/* =========================================================
-   MACHINE CARD
-   ========================================================= */
-
-.machine {
-
-    background:
-        white;
-
-    border-radius:
-        20px;
-
-    padding:
-        25px;
-
-    box-shadow:
-        0 7px 25px
-        rgba(
-            0,
-            0,
-            0,
-            .10
-        );
-
-    border-left:
-        8px solid
-        #16a34a;
-
-}
-
-
-.machine.offline {
-
-    border-left:
-        8px solid
-        #dc2626;
-
-}
-
-
-/* =========================================================
-   MACHINE NAME
-   ========================================================= */
-
-.machine-name {
-
-    font-size:
-        24px;
-
-    font-weight:
-        bold;
-
-    margin-bottom:
-        15px;
-
-    word-break:
-        break-word;
-
-}
-
-
-/* =========================================================
-   STATUS
-   ========================================================= */
-
-.status {
-
-    display:
-        inline-block;
-
-    border-radius:
-        30px;
-
-    padding:
-        10px 20px;
-
-    font-size:
-        18px;
-
-    font-weight:
-        bold;
-
-    margin-bottom:
-        15px;
-
-}
-
-
-.status.online {
-
-    background:
-        #dcfce7;
-
-    color:
-        #166534;
-
-}
-
-
-.status.offline {
-
-    background:
-        #fee2e2;
-
-    color:
-        #991b1b;
-
-}
-
-
-/* =========================================================
-   INFO
-   ========================================================= */
-
-.info {
-
-    padding:
-        12px 0;
-
-    border-bottom:
-        1px solid
-        #e5e7eb;
-
-    line-height:
-        1.5;
-
-}
-
-
-/* =========================================================
-   TELEGRAM BOX
-   ========================================================= */
-
-.telegram-box {
-
-    margin-top:
-        20px;
-
-    padding:
-        15px;
-
-    border-radius:
-        14px;
-
-    background:
-        #f8fafc;
-
-}
-
-
-.telegram-title {
-
-    font-size:
-        18px;
-
-    font-weight:
-        bold;
-
-    margin-bottom:
-        10px;
-
-}
-
-
-.telegram-ok {
-
-    color:
-        #15803d;
-
-    font-weight:
-        bold;
-
-}
-
-
-.telegram-error {
-
-    color:
-        #dc2626;
-
-    font-weight:
-        bold;
-
-}
-
-
-.telegram-none {
-
-    color:
-        #64748b;
-
-}
-
-
-/* =========================================================
-   EMPTY
-   ========================================================= */
-
-.empty {
-
-    background:
-        white;
-
-    border-radius:
-        18px;
-
-    padding:
-        60px 20px;
-
-    text-align:
-        center;
-
-    font-size:
-        20px;
-
-}
-
-
-/* =========================================================
-   FOOTER
-   ========================================================= */
-
-.refresh {
-
-    text-align:
-        center;
-
-    margin-top:
-        25px;
-
-    color:
-        #64748b;
-
-}
-
-
-/* =========================================================
-   MOBILE
-   ========================================================= */
-
-@media (
-    max-width: 600px
-) {
-
-    .header {
-
-        font-size:
-            26px;
-
-        padding:
-            25px 20px;
-
-    }
-
-
-    .container {
-
-        padding:
-            18px;
-
-    }
-
-
-    .machine {
-
-        padding:
-            22px;
-
-    }
-
-
-    .machine-name {
-
-        font-size:
-            22px;
-
-    }
-
-}
-
-</style>
-
-</head>
-
-
-<body>
-
-
-<!-- =======================================================
-     HEADER
-======================================================== -->
-
-<div class="header">
-
-    📡 NETWORK MONITOR
-
-</div>
-
-
-<div class="container">
-
-
-<!-- =======================================================
-     SERVER INFO
-======================================================== -->
-
-<div class="server-box">
-
-    <div class="server-title">
-
-        ☁️ SERVER
-
-    </div>
-
-
-    <div class="server-line">
-
-        🟢 Status:
-        <b>RUNNING</b>
-
-    </div>
-
-
-    <div
-        class="server-line"
-        id="serverTime"
-    >
-
-        🕒 Đang tải...
-
-    </div>
-
-
-    <div class="server-line">
-
-        🔴 Offline sau:
-        <b>30 giây</b>
-
-    </div>
-
-
-    <div
-        class="server-line"
-        id="telegramGlobal"
-    >
-
-        📱 Telegram:
-        Đang kiểm tra...
-
-    </div>
-
-</div>
-
-
-<!-- =======================================================
-     MACHINES
-======================================================== -->
-
-<div
-    class="machine-grid"
-    id="machineGrid"
->
-
-    <div class="empty">
-
-        🔄 Đang tải...
-
-    </div>
-
-</div>
-
-
-<div class="refresh">
-
-    🔄 Tự động cập nhật mỗi 1 giây
-
-</div>
-
-
-</div>
-
-
-<script>
-
-
-// =========================================================
-// ESCAPE HTML
-// =========================================================
-
-function escapeHtml(text) {
-
-    if (
-        text === null ||
-        text === undefined
-    ) {
-
-        return "";
-
-    }
-
-
-    return String(text)
-
-        .replace(
-            /&/g,
-            "&amp;"
-        )
-
-        .replace(
-            /</g,
-            "&lt;"
-        )
-
-        .replace(
-            />/g,
-            "&gt;"
-        )
-
-        .replace(
-            /"/g,
-            "&quot;"
-        )
-
-        .replace(
-            /'/g,
-            "&#039;"
-        );
-
-}
-
-
-// =========================================================
-// LOAD STATUS
-// =========================================================
-
-async function loadStatus() {
-
-    try {
-
-
-        const response =
-            await fetch(
-                "/api/status",
-                {
-                    cache:
-                        "no-store"
-                }
-            );
-
-
-        const data =
-            await response.json();
-
-
-        // =================================================
-        // SERVER TIME
-        // =================================================
-
-        document.getElementById(
-            "serverTime"
-        ).innerHTML =
-
-            "🕒 Giờ Việt Nam: "
-            +
-            escapeHtml(
-                data.time
-            );
-
-
-        // =================================================
-        // GLOBAL TELEGRAM
-        // =================================================
-
-        const tg =
-            data.telegram;
-
-
-        const globalTelegram =
-            document.getElementById(
-                "telegramGlobal"
-            );
-
-
-        if (
-            tg.configured
-        ) {
-
-            if (
-                tg.sent
-            ) {
-
-                globalTelegram.innerHTML =
-
-                    "📱 Telegram: "
-                    +
-                    "<span class='telegram-ok'>"
-                    +
-                    "🟢 ĐÃ GỬI"
-                    +
-                    "</span>"
-                    +
-                    (
-                        tg.last_time
-                        ?
-                        " — "
-                        +
-                        escapeHtml(
-                            tg.last_time
-                        )
-                        :
-                        ""
-                    );
-
-            } else {
-
-                globalTelegram.innerHTML =
-
-                    "📱 Telegram: "
-                    +
-                    "<span class='telegram-error'>"
-                    +
-                    "🔴 CHƯA GỬI"
-                    +
-                    "</span>";
-
-            }
-
-        } else {
-
-            globalTelegram.innerHTML =
-
-                "📱 Telegram: "
-                +
-                "<span class='telegram-error'>"
-                +
-                "🔴 CHƯA CẤU HÌNH"
-                +
-                "</span>";
-
-        }
-
-
-        // =================================================
-        // MACHINE GRID
-        // =================================================
-
-        const grid =
-            document.getElementById(
-                "machineGrid"
-            );
-
-
-        const machines =
-            data.machines;
-
-
-        const names =
-            Object.keys(
-                machines
-            );
-
-
-        if (
-            names.length === 0
-        ) {
-
-            grid.innerHTML = `
-
-                <div class="empty">
-
-                    🖥️ Chưa có máy nào kết nối
-
-                </div>
-
-            `;
-
-            return;
-
-        }
-
-
-        let html = "";
-
-
-        // =================================================
-        // EACH MACHINE
-        // =================================================
-
-        for (
-            const name
-            of names
-        ) {
-
-
-            const machine =
-                machines[name];
-
-
-            const online =
-                machine.status ===
-                "ONLINE";
-
-
-            const safeName =
-                escapeHtml(
-                    name
-                );
-
-
-            const safeIp =
-                escapeHtml(
-                    machine.public_ip
-                );
-
-
-            const safeLastSeen =
-                escapeHtml(
-                    machine.last_seen
-                );
-
-
-            // =============================================
-            // TELEGRAM STATUS
-            // =============================================
-
-            let telegramHtml = "";
-
-
-            if (
-                machine.telegram_sent
-            ) {
-
-                telegramHtml = `
-
-                    <div class="telegram-ok">
-
-                        🟢 ĐÃ GỬI
-
-                    </div>
-
-                    <div>
-
-                        🕒 Lần gửi:
-
-                        <b>
-                            ${
-                                escapeHtml(
-                                    machine.telegram_time
-                                    || "-"
-                                )
-                            }
-                        </b>
-
-                    </div>
-
-                    <div>
-
-                        📌 Sự kiện:
-
-                        <b>
-                            ${
-                                escapeHtml(
-                                    machine.telegram_event
-                                    || "-"
-                                )
-                            }
-                        </b>
-
-                    </div>
-
-                `;
-
-            } else {
-
-
-                telegramHtml = `
-
-                    <div class="telegram-error">
-
-                        🔴 CHƯA GỬI
-
-                    </div>
-
-                `;
-
-
-                if (
-                    machine.telegram_error
-                ) {
-
-                    telegramHtml += `
-
-                        <div>
-
-                            ❌ Lỗi:
-
-                            ${
-                                escapeHtml(
-                                    machine.telegram_error
-                                )
-                            }
-
-                        </div>
-
-                    `;
-
-                }
-
-            }
-
-
-            // =============================================
-            // CARD
-            // =============================================
-
-            html += `
-
-                <div
-                    class="
-                        machine
-                        ${
-                            online
-                            ? ""
-                            : "offline"
-                        }
-                    "
-                >
-
-
-                    <div
-                        class="machine-name"
-                    >
-
-                        🖥️ ${safeName}
-
-                    </div>
-
-
-                    <div
-                        class="
-                            status
-                            ${
-                                online
-                                ? "online"
-                                : "offline"
-                            }
-                        "
-                    >
-
-                        ${
-                            online
-                            ? "🟢 ONLINE"
-                            : "🔴 OFFLINE"
-                        }
-
-                    </div>
-
-
-                    <div class="info">
-
-                        🌐 Public IP:
-
-                        <b>
-                            ${safeIp}
-                        </b>
-
-                    </div>
-
-
-                    <div class="info">
-
-                        🕒 Last Seen:
-
-                        <b>
-                            ${safeLastSeen}
-                        </b>
-
-                    </div>
-
-
-                    <div class="info">
-
-                        ⏱️
-
-                        ${
-                            machine.seconds_since_last_heartbeat
-                        }
-
-                        giây trước
-
-                    </div>
-
-
-                    <div class="telegram-box">
-
-                        <div
-                            class="telegram-title"
-                        >
-
-                            📱 TELEGRAM
-
-                        </div>
-
-                        ${telegramHtml}
-
-                    </div>
-
-
-                </div>
-
-            `;
-
-        }
-
-
-        grid.innerHTML =
-            html;
-
-
-    }
-    catch (error) {
-
-
-        console.error(
-            "STATUS ERROR:",
-            error
-        );
-
-    }
-
-}
-
-
-// =========================================================
-// FIRST LOAD
-// =========================================================
-
-loadStatus();
-
-
-// =========================================================
-// AUTO REFRESH
-// =========================================================
-
-setInterval(
-    loadStatus,
-    1000
-);
-
-
-</script>
-
-
-</body>
-
-</html>
-        """
-    )
 
 
 # ============================================================
@@ -1713,180 +217,646 @@ def watchdog():
 
     while True:
 
-        try:
+        time.sleep(1)
 
-            now = vietnam_now()
+        current_time = vn_now()
 
-            offline_events = []
+        offline_messages = []
 
+        with machines_lock:
 
-            with machines_lock:
+            for machine_name, machine in machines.items():
 
-                for (
-                    machine_name,
-                    machine
-                ) in machines.items():
+                last_seen = machine.get("last_seen")
 
+                if not last_seen:
+                    continue
 
-                    seconds = int(
+                seconds = (
+                    current_time - last_seen
+                ).total_seconds()
 
-                        (
-                            now
-                            -
-                            machine[
-                                "last_seen"
-                            ]
-                        ).total_seconds()
+                # Quá timeout
+                if seconds >= OFFLINE_TIMEOUT:
 
-                    )
+                    # Chỉ gửi Telegram 1 lần
+                    if machine.get("status") != "OFFLINE":
 
+                        machine["status"] = "OFFLINE"
 
-                    # =========================================
-                    # ONLINE -> OFFLINE
-                    # =========================================
+                        machine["telegram_offline_sent"] = True
 
-                    if (
+                        public_ip = machine.get(
+                            "public_ip",
+                            "Unknown"
+                        )
 
-                        machine["online"]
-
-                        and
-
-                        seconds >=
-                        OFFLINE_TIMEOUT
-
-                    ):
-
-
-                        machine[
-                            "online"
-                        ] = False
-
-
-                        machine[
-                            "offline_since"
-                        ] = now
-
-
-                        offline_events.append({
-
-                            "machine":
-                                machine_name,
-
-                            "public_ip":
-                                machine[
-                                    "public_ip"
-                                ],
-
-                            "last_seen":
-                                machine[
-                                    "last_seen"
-                                ],
-
-                            "offline_since":
-                                now,
-
-                            "seconds":
-                                seconds
-
+                        offline_messages.append({
+                            "machine": machine_name,
+                            "public_ip": public_ip,
+                            "last_seen": last_seen.strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )
                         })
 
+        # Gửi ngoài lock
+        for item in offline_messages:
 
-            # =================================================
-            # SEND OFFLINE TELEGRAM
-            # =================================================
-
-            for event in offline_events:
-
-
-                message = (
-
-                    "🔴 MÁY ĐÃ OFFLINE\n\n"
-
-                    f"🖥️ Máy:\n"
-                    f"{event['machine']}\n\n"
-
-                    f"🌐 Public IP cuối:\n"
-                    f"{event['public_ip']}\n\n"
-
-                    f"🕒 Heartbeat cuối:\n"
-                    f"{format_time(event['last_seen'])}\n\n"
-
-                    f"🔴 Phát hiện mất kết nối:\n"
-                    f"{format_time(event['offline_since'])}\n\n"
-
-                    f"⏱️ Không nhận heartbeat:\n"
-                    f"{event['seconds']} giây"
-
+            send_telegram(
+                telegram_offline_message(
+                    item["machine"],
+                    item["public_ip"],
+                    item["last_seen"]
                 )
-
-
-                success = send_telegram(
-
-                    message,
-
-                    "OFFLINE",
-
-                    event["machine"]
-
-                )
-
-
-                # =============================================
-                # SAVE TELEGRAM RESULT TO MACHINE
-                # =============================================
-
-                with machines_lock:
-
-                    machine =
-                        machines[
-                            event["machine"]
-                        ]
-
-
-                    machine[
-                        "telegram_sent"
-                    ] = success
-
-
-                    machine[
-                        "telegram_time"
-                    ] = format_time(
-                        vietnam_now()
-                    )
-
-
-                    machine[
-                        "telegram_event"
-                    ] = "OFFLINE"
-
-
-                    machine[
-                        "telegram_error"
-                    ] = (
-
-                        None
-
-                        if success
-
-                        else
-                        telegram_status[
-                            "last_error"
-                        ]
-
-                    )
-
-
-        except Exception as ex:
-
-            print(
-                "WATCHDOG ERROR:",
-                ex
             )
 
 
-        time.sleep(
-            CHECK_INTERVAL
-        )
+# ============================================================
+# API STATUS
+# ============================================================
+
+@app.route("/api/status", methods=["GET"])
+def api_status():
+
+    current_time = vn_now()
+
+    result = {}
+
+    with machines_lock:
+
+        for machine_name, machine in machines.items():
+
+            last_seen = machine.get("last_seen")
+
+            if not last_seen:
+                continue
+
+            seconds = int(
+                (
+                    current_time - last_seen
+                ).total_seconds()
+            )
+
+            status = (
+                "ONLINE"
+                if seconds < OFFLINE_TIMEOUT
+                else "OFFLINE"
+            )
+
+            result[machine_name] = {
+                "last_seen": last_seen.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                "public_ip": machine.get(
+                    "public_ip",
+                    "Unknown"
+                ),
+                "seconds_since_last_heartbeat": seconds,
+                "status": status
+            }
+
+    return jsonify({
+        "server": "RUNNING",
+        "time": vn_time_string(),
+        "offline_timeout": OFFLINE_TIMEOUT,
+        "telegram": {
+            "configured": telegram_configured(),
+            "status": (
+                "CONFIGURED"
+                if telegram_configured()
+                else "NOT CONFIGURED"
+            )
+        },
+        "machines": result
+    })
+
+
+# ============================================================
+# TEST TELEGRAM
+# ============================================================
+
+@app.route("/test-telegram", methods=["GET"])
+def test_telegram():
+
+    if not telegram_configured():
+
+        return jsonify({
+            "status": "ERROR",
+            "message": "BOT_TOKEN hoặc CHAT_ID chưa cấu hình"
+        }), 400
+
+    message = f"""🧪 TEST TELEGRAM
+
+✅ Network Monitor kết nối Telegram thành công.
+
+🕒 Thời gian:
+{vn_time_string()}"""
+
+    success, result = send_telegram(message)
+
+    return jsonify({
+        "success": success,
+        "message": result
+    })
+
+
+# ============================================================
+# HOME UI
+# ============================================================
+
+HTML = """
+<!DOCTYPE html>
+
+<html lang="vi">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>Network Monitor</title>
+
+<style>
+
+*{
+    box-sizing:border-box;
+}
+
+body{
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#eef1f5;
+    color:#1f2937;
+}
+
+.header{
+    background:#111827;
+    color:white;
+    padding:25px;
+}
+
+.header h1{
+    margin:0;
+    font-size:30px;
+}
+
+.container{
+    max-width:1150px;
+    margin:auto;
+    padding:25px;
+}
+
+.info{
+    background:white;
+    border-radius:18px;
+    padding:22px;
+    margin-bottom:25px;
+    box-shadow:
+        0 5px 20px rgba(0,0,0,.08);
+}
+
+.info-row{
+    margin:10px 0;
+    font-size:17px;
+}
+
+.dot{
+    display:inline-block;
+    width:16px;
+    height:16px;
+    border-radius:50%;
+    margin-right:8px;
+    vertical-align:middle;
+}
+
+.green{
+    background:#16a34a;
+    border:1px solid #087a2f;
+}
+
+.red{
+    background:#dc2626;
+    border:1px solid #991b1b;
+}
+
+.telegram-ok{
+    color:#15803d;
+    font-weight:bold;
+}
+
+.telegram-error{
+    color:#dc2626;
+    font-weight:bold;
+}
+
+.machine{
+    background:white;
+    border-radius:20px;
+    padding:30px;
+    margin-bottom:20px;
+    border-left:7px solid #16a34a;
+    box-shadow:
+        0 5px 20px rgba(0,0,0,.08);
+}
+
+.machine.offline{
+    border-left-color:#ef1111;
+}
+
+.machine h2{
+    margin-top:0;
+    font-size:26px;
+}
+
+.status{
+    display:inline-flex;
+    align-items:center;
+    padding:12px 20px;
+    border-radius:30px;
+    font-weight:bold;
+    margin-bottom:18px;
+}
+
+.status.online{
+    background:#dcfce7;
+    color:#166534;
+}
+
+.status.offline{
+    background:#fee2e2;
+    color:#991b1b;
+}
+
+.line{
+    padding:13px 0;
+    border-bottom:1px solid #e5e7eb;
+    font-size:18px;
+}
+
+.no-machine{
+    background:white;
+    padding:40px;
+    text-align:center;
+    border-radius:20px;
+    font-size:20px;
+}
+
+.button{
+    display:inline-block;
+    margin-top:10px;
+    padding:10px 16px;
+    background:#229ED9;
+    color:white;
+    border-radius:8px;
+    text-decoration:none;
+    font-weight:bold;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="header">
+
+    <h1>
+        📡 NETWORK MONITOR
+    </h1>
+
+</div>
+
+
+<div class="container">
+
+    <div class="info">
+
+        <div class="info-row">
+
+            ☁️ Server:
+
+            <span class="dot green"></span>
+
+            <b>RUNNING</b>
+
+        </div>
+
+
+        <div class="info-row">
+
+            🕒 Giờ Việt Nam:
+
+            <b id="vnTime">
+                Loading...
+            </b>
+
+        </div>
+
+
+        <div class="info-row">
+
+            🔴 Offline timeout:
+
+            <b id="timeout">
+                30 giây
+            </b>
+
+        </div>
+
+
+        <div class="info-row">
+
+            🤖 Telegram:
+
+            <span id="telegramStatus">
+                Checking...
+            </span>
+
+            <br>
+
+            <a
+                class="button"
+                href="/test-telegram"
+                target="_blank"
+            >
+                🧪 Test Telegram
+            </a>
+
+        </div>
+
+    </div>
+
+
+    <div id="machineList">
+
+        <div class="no-machine">
+
+            ⏳ Đang tải dữ liệu...
+
+        </div>
+
+    </div>
+
+
+    <div
+        style="
+            text-align:center;
+            color:#64748b;
+            padding:10px;
+        "
+    >
+
+        🔄 Tự động cập nhật mỗi 1 giây
+
+    </div>
+
+</div>
+
+
+<script>
+
+function escapeHtml(text){
+
+    return String(text)
+        .replace(/&/g,"&amp;")
+        .replace(/</g,"&lt;")
+        .replace(/>/g,"&gt;")
+        .replace(/"/g,"&quot;")
+        .replace(/'/g,"&#039;");
+
+}
+
+
+async function loadStatus(){
+
+    try{
+
+        const response =
+            await fetch(
+                "/api/status?t=" + Date.now()
+            );
+
+        const data =
+            await response.json();
+
+
+        document.getElementById(
+            "vnTime"
+        ).textContent =
+            data.time;
+
+
+        document.getElementById(
+            "timeout"
+        ).textContent =
+            data.offline_timeout +
+            " giây";
+
+
+        const telegram =
+            document.getElementById(
+                "telegramStatus"
+            );
+
+
+        if(
+            data.telegram &&
+            data.telegram.configured
+        ){
+
+            telegram.innerHTML =
+                "🟢 <span class='telegram-ok'>" +
+                "ĐÃ CẤU HÌNH" +
+                "</span>";
+
+        }
+        else{
+
+            telegram.innerHTML =
+                "🔴 <span class='telegram-error'>" +
+                "CHƯA CẤU HÌNH" +
+                "</span>";
+
+        }
+
+
+        const machineList =
+            document.getElementById(
+                "machineList"
+            );
+
+
+        const machines =
+            data.machines || {};
+
+
+        const names =
+            Object.keys(machines);
+
+
+        if(names.length === 0){
+
+            machineList.innerHTML =
+
+                `<div class="no-machine">
+                    🖥️ Chưa có máy nào kết nối
+                </div>`;
+
+            return;
+
+        }
+
+
+        let html = "";
+
+
+        names.forEach(function(name){
+
+            const machine =
+                machines[name];
+
+
+            const isOnline =
+                machine.status === "ONLINE";
+
+
+            const statusClass =
+                isOnline
+                ? "online"
+                : "offline";
+
+
+            const machineClass =
+                isOnline
+                ? ""
+                : "offline";
+
+
+            const dotClass =
+                isOnline
+                ? "green"
+                : "red";
+
+
+            const seconds =
+                machine.seconds_since_last_heartbeat;
+
+
+            html += `
+
+                <div
+                    class="
+                        machine
+                        ${machineClass}
+                    "
+                >
+
+                    <h2>
+                        🖥️
+                        ${escapeHtml(name)}
+                    </h2>
+
+
+                    <div
+                        class="
+                            status
+                            ${statusClass}
+                        "
+                    >
+
+                        <span
+                            class="
+                                dot
+                                ${dotClass}
+                            "
+                        ></span>
+
+                        ${machine.status}
+
+                    </div>
+
+
+                    <div class="line">
+
+                        🌐 Public IP:
+
+                        <b>
+                            ${escapeHtml(
+                                machine.public_ip
+                            )}
+                        </b>
+
+                    </div>
+
+
+                    <div class="line">
+
+                        🕒 Last Seen:
+
+                        <b>
+                            ${machine.last_seen}
+                        </b>
+
+                    </div>
+
+
+                    <div class="line">
+
+                        ⏱️ Heartbeat:
+
+                        <b>
+                            ${seconds}
+                            giây trước
+                        </b>
+
+                    </div>
+
+                </div>
+
+            `;
+
+        });
+
+
+        machineList.innerHTML =
+            html;
+
+
+    }
+    catch(error){
+
+        console.error(error);
+
+    }
+
+}
+
+
+loadStatus();
+
+setInterval(
+    loadStatus,
+    1000
+);
+
+</script>
+
+</body>
+
+</html>
+"""
+
+
+@app.route("/", methods=["GET"])
+def home():
+
+    return render_template_string(
+        HTML
+    )
 
 
 # ============================================================
@@ -1894,36 +864,21 @@ def watchdog():
 # ============================================================
 
 watchdog_thread = threading.Thread(
-
     target=watchdog,
-
     daemon=True
-
 )
 
 watchdog_thread.start()
 
 
 # ============================================================
-# START SERVER
+# LOCAL RUN
 # ============================================================
 
 if __name__ == "__main__":
 
-    port = int(
-
-        os.environ.get(
-            "PORT",
-            10000
-        )
-
-    )
-
-
     app.run(
-
         host="0.0.0.0",
-
-        port=port
-
+        port=5000,
+        debug=False
     )
