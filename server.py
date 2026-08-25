@@ -1,63 +1,80 @@
-from flask import Flask, jsonify, request, render_template_string
-import threading
-import time
-from datetime import datetime, timedelta, timezone
 import os
+import time
+import threading
 import requests
+
+from flask import Flask, jsonify, request, render_template_string
+from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
 
-# ============================================================
+# =========================================================
 # CONFIG
-# ============================================================
+# =========================================================
 
 OFFLINE_TIMEOUT = 30
+CHECK_INTERVAL = 2
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 
-# Lưu thông tin máy
-machines = {}
-
-# Lock tránh lỗi khi nhiều request cùng truy cập
-machines_lock = threading.Lock()
-
-# Giờ Việt Nam UTC + 7
+# Giờ Việt Nam UTC+7
 VN_TZ = timezone(timedelta(hours=7))
 
+machines = {}
 
-# ============================================================
+machines_lock = threading.Lock()
+
+
+# =========================================================
 # TIME
-# ============================================================
+# =========================================================
 
-def vn_now():
+def now_vn():
+
     return datetime.now(VN_TZ)
 
 
-def vn_time_string():
-    return vn_now().strftime("%Y-%m-%d %H:%M:%S")
+def format_time(dt):
+
+    if not dt:
+        return ""
+
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-# ============================================================
+# =========================================================
 # TELEGRAM
-# ============================================================
-
-def telegram_configured():
-    return bool(BOT_TOKEN and CHAT_ID)
-
+# =========================================================
 
 def send_telegram(message):
-    """
-    Gửi tin nhắn Telegram.
-    Không làm crash server nếu Telegram lỗi.
-    """
 
-    if not telegram_configured():
-        return False, "BOT_TOKEN hoặc CHAT_ID chưa cấu hình"
+    print("")
+
+    print("=" * 60)
+
+    print("📨 TELEGRAM SEND")
+
+    print(f"BOT_TOKEN: {'OK' if BOT_TOKEN else 'EMPTY'}")
+
+    print(f"CHAT_ID: {'OK' if CHAT_ID else 'EMPTY'}")
+
+    print(message)
+
+    print("=" * 60)
+
+    if not BOT_TOKEN or not CHAT_ID:
+
+        print("❌ TELEGRAM CHƯA CẤU HÌNH BOT_TOKEN HOẶC CHAT_ID")
+
+        return False
 
     try:
 
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        url = (
+            f"https://api.telegram.org/"
+            f"bot{BOT_TOKEN}/sendMessage"
+        )
 
         data = {
             "chat_id": CHAT_ID,
@@ -66,30 +83,41 @@ def send_telegram(message):
 
         response = requests.post(
             url,
-            json=data,
+            data=data,
             timeout=15
         )
 
-        result = response.json()
+        print(f"Telegram HTTP: {response.status_code}")
 
-        if response.status_code == 200 and result.get("ok"):
+        print(
+            f"Telegram Response: "
+            f"{response.text}"
+        )
 
-            return True, "Telegram gửi thành công"
+        if response.status_code == 200:
 
-        return False, str(result)
+            print("✅ TELEGRAM GỬI THÀNH CÔNG")
+
+            return True
+
+        print("❌ TELEGRAM GỬI THẤT BẠI")
+
+        return False
 
     except Exception as e:
 
-        return False, str(e)
+        print(f"❌ TELEGRAM ERROR: {e}")
+
+        return False
 
 
-# ============================================================
-# FORMAT TELEGRAM
-# ============================================================
+# =========================================================
+# SEND ONLINE
+# =========================================================
 
-def telegram_online_message(machine_name, public_ip):
+def send_online(machine_name, public_ip):
 
-    return f"""🟢 MÁY ĐÃ ONLINE
+    message = f"""🟢 MÁY ĐÃ ONLINE
 
 🖥️ Máy:
 {machine_name}
@@ -98,12 +126,19 @@ def telegram_online_message(machine_name, public_ip):
 {public_ip}
 
 🕒 Thời gian:
-{vn_time_string()}"""
+{format_time(now_vn())}
+"""
+
+    return send_telegram(message)
 
 
-def telegram_offline_message(machine_name, public_ip, last_seen):
+# =========================================================
+# SEND OFFLINE
+# =========================================================
 
-    return f"""🔴 MÁY ĐÃ OFFLINE
+def send_offline(machine_name, public_ip, last_seen):
+
+    message = f"""🔴 MÁY ĐÃ OFFLINE
 
 🖥️ Máy:
 {machine_name}
@@ -111,260 +146,403 @@ def telegram_offline_message(machine_name, public_ip, last_seen):
 🌐 Public IP:
 {public_ip}
 
-🕒 Last Seen:
-{last_seen}
+🕒 Mất kết nối lúc:
+{format_time(last_seen)}
 
-⏱️ Offline timeout:
+⏱️ Không nhận heartbeat quá:
 {OFFLINE_TIMEOUT} giây
 
 📅 Thời gian phát hiện:
-{vn_time_string()}"""
+{format_time(now_vn())}
+"""
+
+    return send_telegram(message)
 
 
-# ============================================================
+# =========================================================
 # HEARTBEAT
-# ============================================================
+# =========================================================
 
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
 
-    data = request.get_json(silent=True)
+    try:
 
-    if not data:
-        data = request.form.to_dict()
-
-    machine_name = data.get("machine")
-
-    if not machine_name:
-        machine_name = request.headers.get("X-Machine-Name")
-
-    if not machine_name:
-        return jsonify({
-            "status": "ERROR",
-            "message": "machine is required"
-        }), 400
-
-    machine_name = str(machine_name).strip().upper()
-
-    public_ip = data.get("public_ip", "")
-
-    if not public_ip:
-        public_ip = request.remote_addr
-
-    current_time = vn_now()
-
-    need_send_online = False
-
-    with machines_lock:
-
-        # Máy chưa tồn tại
-        if machine_name not in machines:
-
-            machines[machine_name] = {
-                "last_seen": current_time,
-                "public_ip": public_ip,
-                "status": "ONLINE",
-                "telegram_online_sent": False,
-                "telegram_offline_sent": False
-            }
-
-            need_send_online = True
-
-        else:
-
-            machine = machines[machine_name]
-
-            old_status = machine.get("status", "OFFLINE")
-
-            machine["last_seen"] = current_time
-            machine["public_ip"] = public_ip
-            machine["status"] = "ONLINE"
-
-            # Nếu trước đó OFFLINE
-            # bây giờ heartbeat lại => ONLINE
-            if old_status == "OFFLINE":
-
-                need_send_online = True
-
-                machine["telegram_offline_sent"] = False
-
-        if need_send_online:
-
-            machines[machine_name]["telegram_online_sent"] = True
-
-    # Gửi Telegram ngoài lock
-    if need_send_online:
-
-        send_telegram(
-            telegram_online_message(
-                machine_name,
-                public_ip
-            )
+        data = request.get_json(
+            silent=True
         )
 
-    return jsonify({
-        "status": "OK",
-        "machine": machine_name,
-        "time": vn_time_string()
-    })
+        if not data:
 
+            return jsonify({
+                "status": "ERROR",
+                "message": "Invalid JSON"
+            }), 400
 
-# ============================================================
-# WATCHDOG
-# ============================================================
+        machine_name = (
+            data.get("machine")
+            or data.get("hostname")
+            or ""
+        ).strip()
 
-def watchdog():
+        public_ip = (
+            data.get("public_ip")
+            or request.remote_addr
+        ).strip()
 
-    while True:
+        if not machine_name:
 
-        time.sleep(1)
+            return jsonify({
+                "status": "ERROR",
+                "message": "machine is required"
+            }), 400
 
-        current_time = vn_now()
+        current_time = now_vn()
 
-        offline_messages = []
+        need_send_online = False
 
         with machines_lock:
 
-            for machine_name, machine in machines.items():
+            if machine_name not in machines:
 
-                last_seen = machine.get("last_seen")
-
-                if not last_seen:
-                    continue
-
-                seconds = (
-                    current_time - last_seen
-                ).total_seconds()
-
-                # Quá timeout
-                if seconds >= OFFLINE_TIMEOUT:
-
-                    # Chỉ gửi Telegram 1 lần
-                    if machine.get("status") != "OFFLINE":
-
-                        machine["status"] = "OFFLINE"
-
-                        machine["telegram_offline_sent"] = True
-
-                        public_ip = machine.get(
-                            "public_ip",
-                            "Unknown"
-                        )
-
-                        offline_messages.append({
-                            "machine": machine_name,
-                            "public_ip": public_ip,
-                            "last_seen": last_seen.strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            )
-                        })
-
-        # Gửi ngoài lock
-        for item in offline_messages:
-
-            send_telegram(
-                telegram_offline_message(
-                    item["machine"],
-                    item["public_ip"],
-                    item["last_seen"]
+                print(
+                    f"[NEW MACHINE] "
+                    f"{machine_name}"
                 )
+
+                machines[machine_name] = {
+
+                    "last_seen": current_time,
+
+                    "public_ip": public_ip,
+
+                    "status": "ONLINE",
+
+                    "offline_notified": False,
+
+                    "online_notified": False
+                }
+
+                need_send_online = True
+
+            else:
+
+                machine = machines[machine_name]
+
+                was_offline = (
+                    machine.get("status")
+                    == "OFFLINE"
+                )
+
+                machine["last_seen"] = (
+                    current_time
+                )
+
+                machine["public_ip"] = (
+                    public_ip
+                )
+
+                machine["status"] = "ONLINE"
+
+                machine["offline_notified"] = False
+
+                if was_offline:
+
+                    need_send_online = True
+
+                elif not machine.get(
+                    "online_notified",
+                    False
+                ):
+
+                    need_send_online = True
+
+        # Gửi Telegram ngoài lock
+        if need_send_online:
+
+            success = send_online(
+                machine_name,
+                public_ip
             )
 
+            with machines_lock:
 
-# ============================================================
+                if machine_name in machines:
+
+                    machines[machine_name][
+                        "online_notified"
+                    ] = success
+
+        return jsonify({
+
+            "status": "OK",
+
+            "machine": machine_name,
+
+            "time": format_time(
+                current_time
+            )
+
+        }), 200
+
+    except Exception as e:
+
+        print(
+            f"[HEARTBEAT ERROR] {e}"
+        )
+
+        return jsonify({
+
+            "status": "ERROR",
+
+            "message": str(e)
+
+        }), 500
+
+
+# =========================================================
+# WATCHDOG
+# =========================================================
+
+def watchdog():
+
+    print(
+        "🛡️ WATCHDOG STARTED"
+    )
+
+    while True:
+
+        try:
+
+            current_time = now_vn()
+
+            offline_list = []
+
+            with machines_lock:
+
+                for machine_name, machine in machines.items():
+
+                    last_seen = machine.get(
+                        "last_seen"
+                    )
+
+                    if not last_seen:
+
+                        continue
+
+                    seconds_offline = (
+                        current_time -
+                        last_seen
+                    ).total_seconds()
+
+                    # Quá 30 giây
+                    if (
+                        seconds_offline >
+                        OFFLINE_TIMEOUT
+                    ):
+
+                        # Chỉ gửi 1 lần
+                        if not machine.get(
+                            "offline_notified",
+                            False
+                        ):
+
+                            print("")
+
+                            print(
+                                "🚨 OFFLINE DETECTED"
+                            )
+
+                            print(
+                                f"Machine: "
+                                f"{machine_name}"
+                            )
+
+                            print(
+                                f"Seconds: "
+                                f"{int(seconds_offline)}"
+                            )
+
+                            machine[
+                                "status"
+                            ] = "OFFLINE"
+
+                            machine[
+                                "offline_notified"
+                            ] = True
+
+                            machine[
+                                "online_notified"
+                            ] = False
+
+                            offline_list.append({
+
+                                "machine_name":
+                                    machine_name,
+
+                                "public_ip":
+                                    machine.get(
+                                        "public_ip",
+                                        ""
+                                    ),
+
+                                "last_seen":
+                                    last_seen
+                            })
+
+                    else:
+
+                        machine[
+                            "status"
+                        ] = "ONLINE"
+
+            # Gửi Telegram ngoài lock
+            for item in offline_list:
+
+                send_offline(
+
+                    item[
+                        "machine_name"
+                    ],
+
+                    item[
+                        "public_ip"
+                    ],
+
+                    item[
+                        "last_seen"
+                    ]
+                )
+
+        except Exception as e:
+
+            print(
+                f"[WATCHDOG ERROR] {e}"
+            )
+
+        time.sleep(
+            CHECK_INTERVAL
+        )
+
+
+# =========================================================
 # API STATUS
-# ============================================================
+# =========================================================
 
 @app.route("/api/status", methods=["GET"])
 def api_status():
 
-    current_time = vn_now()
+    current_time = now_vn()
 
     result = {}
 
     with machines_lock:
 
-        for machine_name, machine in machines.items():
+        for name, machine in machines.items():
 
-            last_seen = machine.get("last_seen")
-
-            if not last_seen:
-                continue
-
-            seconds = int(
-                (
-                    current_time - last_seen
-                ).total_seconds()
+            last_seen = machine.get(
+                "last_seen"
             )
 
-            status = (
-                "ONLINE"
-                if seconds < OFFLINE_TIMEOUT
-                else "OFFLINE"
-            )
+            seconds = 0
 
-            result[machine_name] = {
-                "last_seen": last_seen.strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-                "public_ip": machine.get(
-                    "public_ip",
-                    "Unknown"
-                ),
-                "seconds_since_last_heartbeat": seconds,
-                "status": status
+            if last_seen:
+
+                seconds = int(
+                    (
+                        current_time -
+                        last_seen
+                    ).total_seconds()
+                )
+
+            status = "ONLINE"
+
+            if seconds > OFFLINE_TIMEOUT:
+
+                status = "OFFLINE"
+
+            result[name] = {
+
+                "status": status,
+
+                "public_ip":
+                    machine.get(
+                        "public_ip",
+                        ""
+                    ),
+
+                "last_seen":
+                    format_time(
+                        last_seen
+                    ),
+
+                "seconds_since_last_heartbeat":
+                    seconds,
+
+                "offline_notified":
+                    machine.get(
+                        "offline_notified",
+                        False
+                    )
             }
 
     return jsonify({
+
         "server": "RUNNING",
-        "time": vn_time_string(),
-        "offline_timeout": OFFLINE_TIMEOUT,
-        "telegram": {
-            "configured": telegram_configured(),
-            "status": (
-                "CONFIGURED"
-                if telegram_configured()
-                else "NOT CONFIGURED"
-            )
-        },
+
+        "time": format_time(
+            current_time
+        ),
+
+        "offline_timeout":
+            OFFLINE_TIMEOUT,
+
         "machines": result
     })
 
 
-# ============================================================
+# =========================================================
 # TEST TELEGRAM
-# ============================================================
+# =========================================================
 
-@app.route("/test-telegram", methods=["GET"])
+@app.route(
+    "/test-telegram",
+    methods=["GET"]
+)
 def test_telegram():
-
-    if not telegram_configured():
-
-        return jsonify({
-            "status": "ERROR",
-            "message": "BOT_TOKEN hoặc CHAT_ID chưa cấu hình"
-        }), 400
 
     message = f"""🧪 TEST TELEGRAM
 
 ✅ Network Monitor kết nối Telegram thành công.
 
 🕒 Thời gian:
-{vn_time_string()}"""
+{format_time(now_vn())}
+"""
 
-    success, result = send_telegram(message)
+    success = send_telegram(
+        message
+    )
 
     return jsonify({
+
         "success": success,
-        "message": result
+
+        "bot_configured":
+            bool(BOT_TOKEN),
+
+        "chat_configured":
+            bool(CHAT_ID)
     })
 
 
-# ============================================================
-# HOME UI
-# ============================================================
+# =========================================================
+# WEB UI
+# =========================================================
 
-HTML = """
+@app.route("/", methods=["GET"])
+def index():
+
+    html = """
 <!DOCTYPE html>
 
 <html lang="vi">
@@ -374,146 +552,136 @@ HTML = """
 <meta charset="UTF-8">
 
 <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
+name="viewport"
+content="width=device-width, initial-scale=1.0"
 >
 
 <title>Network Monitor</title>
 
 <style>
 
-*{
-    box-sizing:border-box;
+body {
+
+    margin: 0;
+
+    font-family:
+        Arial,
+        sans-serif;
+
+    background:
+        #f3f4f6;
+
 }
 
-body{
-    margin:0;
-    font-family:Arial,sans-serif;
-    background:#eef1f5;
-    color:#1f2937;
+.header {
+
+    background:
+        #172033;
+
+    color:
+        white;
+
+    padding:
+        25px;
+
+    font-size:
+        32px;
+
+    font-weight:
+        bold;
+
 }
 
-.header{
-    background:#111827;
-    color:white;
-    padding:25px;
+.container {
+
+    max-width:
+        1100px;
+
+    margin:
+        auto;
+
+    padding:
+        25px;
+
 }
 
-.header h1{
-    margin:0;
-    font-size:30px;
+.info {
+
+    background:
+        white;
+
+    padding:
+        20px;
+
+    border-radius:
+        15px;
+
+    margin-bottom:
+        20px;
+
 }
 
-.container{
-    max-width:1150px;
-    margin:auto;
-    padding:25px;
+.machine {
+
+    background:
+        white;
+
+    border-radius:
+        18px;
+
+    padding:
+        25px;
+
+    margin-bottom:
+        20px;
+
+    border-left:
+        8px solid green;
+
 }
 
-.info{
-    background:white;
-    border-radius:18px;
-    padding:22px;
-    margin-bottom:25px;
-    box-shadow:
-        0 5px 20px rgba(0,0,0,.08);
+.machine.offline {
+
+    border-left-color:
+        red;
+
 }
 
-.info-row{
-    margin:10px 0;
-    font-size:17px;
+.status {
+
+    font-size:
+        24px;
+
+    font-weight:
+        bold;
+
+    margin:
+        15px 0;
+
 }
 
-.dot{
-    display:inline-block;
-    width:16px;
-    height:16px;
-    border-radius:50%;
-    margin-right:8px;
-    vertical-align:middle;
+.online {
+
+    color:
+        green;
+
 }
 
-.green{
-    background:#16a34a;
-    border:1px solid #087a2f;
+.offline {
+
+    color:
+        red;
+
 }
 
-.red{
-    background:#dc2626;
-    border:1px solid #991b1b;
-}
+.row {
 
-.telegram-ok{
-    color:#15803d;
-    font-weight:bold;
-}
+    padding:
+        12px 0;
 
-.telegram-error{
-    color:#dc2626;
-    font-weight:bold;
-}
+    border-bottom:
+        1px solid #ddd;
 
-.machine{
-    background:white;
-    border-radius:20px;
-    padding:30px;
-    margin-bottom:20px;
-    border-left:7px solid #16a34a;
-    box-shadow:
-        0 5px 20px rgba(0,0,0,.08);
-}
-
-.machine.offline{
-    border-left-color:#ef1111;
-}
-
-.machine h2{
-    margin-top:0;
-    font-size:26px;
-}
-
-.status{
-    display:inline-flex;
-    align-items:center;
-    padding:12px 20px;
-    border-radius:30px;
-    font-weight:bold;
-    margin-bottom:18px;
-}
-
-.status.online{
-    background:#dcfce7;
-    color:#166534;
-}
-
-.status.offline{
-    background:#fee2e2;
-    color:#991b1b;
-}
-
-.line{
-    padding:13px 0;
-    border-bottom:1px solid #e5e7eb;
-    font-size:18px;
-}
-
-.no-machine{
-    background:white;
-    padding:40px;
-    text-align:center;
-    border-radius:20px;
-    font-size:20px;
-}
-
-.button{
-    display:inline-block;
-    margin-top:10px;
-    padding:10px 16px;
-    background:#229ED9;
-    color:white;
-    border-radius:8px;
-    text-decoration:none;
-    font-weight:bold;
 }
 
 </style>
@@ -524,322 +692,171 @@ body{
 
 <div class="header">
 
-    <h1>
-        📡 NETWORK MONITOR
-    </h1>
+📡 NETWORK MONITOR
 
 </div>
-
 
 <div class="container">
 
-    <div class="info">
+<div
+class="info"
+id="serverInfo"
+>
 
-        <div class="info-row">
-
-            ☁️ Server:
-
-            <span class="dot green"></span>
-
-            <b>RUNNING</b>
-
-        </div>
-
-
-        <div class="info-row">
-
-            🕒 Giờ Việt Nam:
-
-            <b id="vnTime">
-                Loading...
-            </b>
-
-        </div>
-
-
-        <div class="info-row">
-
-            🔴 Offline timeout:
-
-            <b id="timeout">
-                30 giây
-            </b>
-
-        </div>
-
-
-        <div class="info-row">
-
-            🤖 Telegram:
-
-            <span id="telegramStatus">
-                Checking...
-            </span>
-
-            <br>
-
-            <a
-                class="button"
-                href="/test-telegram"
-                target="_blank"
-            >
-                🧪 Test Telegram
-            </a>
-
-        </div>
-
-    </div>
-
-
-    <div id="machineList">
-
-        <div class="no-machine">
-
-            ⏳ Đang tải dữ liệu...
-
-        </div>
-
-    </div>
-
-
-    <div
-        style="
-            text-align:center;
-            color:#64748b;
-            padding:10px;
-        "
-    >
-
-        🔄 Tự động cập nhật mỗi 1 giây
-
-    </div>
+Đang tải...
 
 </div>
 
+<div
+id="machines"
+>
+
+</div>
+
+</div>
 
 <script>
 
-function escapeHtml(text){
+async function loadData() {
 
-    return String(text)
-        .replace(/&/g,"&amp;")
-        .replace(/</g,"&lt;")
-        .replace(/>/g,"&gt;")
-        .replace(/"/g,"&quot;")
-        .replace(/'/g,"&#039;");
-
-}
-
-
-async function loadStatus(){
-
-    try{
+    try {
 
         const response =
             await fetch(
-                "/api/status?t=" + Date.now()
+                "/api/status"
             );
 
         const data =
             await response.json();
 
+        document
+            .getElementById(
+                "serverInfo"
+            )
+            .innerHTML = `
 
-        document.getElementById(
-            "vnTime"
-        ).textContent =
-            data.time;
+<b>☁️ Server:</b>
+🟢 ${data.server}
 
+<br><br>
 
-        document.getElementById(
-            "timeout"
-        ).textContent =
-            data.offline_timeout +
-            " giây";
+<b>🕒 Giờ Việt Nam:</b>
+${data.time}
 
+<br><br>
 
-        const telegram =
-            document.getElementById(
-                "telegramStatus"
-            );
+<b>🔴 Offline timeout:</b>
+${data.offline_timeout} giây
 
-
-        if(
-            data.telegram &&
-            data.telegram.configured
-        ){
-
-            telegram.innerHTML =
-                "🟢 <span class='telegram-ok'>" +
-                "ĐÃ CẤU HÌNH" +
-                "</span>";
-
-        }
-        else{
-
-            telegram.innerHTML =
-                "🔴 <span class='telegram-error'>" +
-                "CHƯA CẤU HÌNH" +
-                "</span>";
-
-        }
-
-
-        const machineList =
-            document.getElementById(
-                "machineList"
-            );
-
-
-        const machines =
-            data.machines || {};
-
-
-        const names =
-            Object.keys(machines);
-
-
-        if(names.length === 0){
-
-            machineList.innerHTML =
-
-                `<div class="no-machine">
-                    🖥️ Chưa có máy nào kết nối
-                </div>`;
-
-            return;
-
-        }
-
+`;
 
         let html = "";
 
+        for (
+            const name
+            in data.machines
+        ) {
 
-        names.forEach(function(name){
+            const m =
+                data.machines[name];
 
-            const machine =
-                machines[name];
-
-
-            const isOnline =
-                machine.status === "ONLINE";
-
-
-            const statusClass =
-                isOnline
-                ? "online"
-                : "offline";
-
-
-            const machineClass =
-                isOnline
-                ? ""
-                : "offline";
-
-
-            const dotClass =
-                isOnline
-                ? "green"
-                : "red";
-
-
-            const seconds =
-                machine.seconds_since_last_heartbeat;
-
+            const isOffline =
+                m.status === "OFFLINE";
 
             html += `
 
-                <div
-                    class="
-                        machine
-                        ${machineClass}
-                    "
-                >
+<div
+class="machine ${
+    isOffline
+    ? "offline"
+    : ""
+}"
+>
 
-                    <h2>
-                        🖥️
-                        ${escapeHtml(name)}
-                    </h2>
+<h2>
 
+🖥️ ${name}
 
-                    <div
-                        class="
-                            status
-                            ${statusClass}
-                        "
-                    >
+</h2>
 
-                        <span
-                            class="
-                                dot
-                                ${dotClass}
-                            "
-                        ></span>
+<div
+class="status ${
+    isOffline
+    ? "offline"
+    : "online"
+}"
+>
 
-                        ${machine.status}
+${
+    isOffline
+    ? "🔴 OFFLINE"
+    : "🟢 ONLINE"
+}
 
-                    </div>
+</div>
 
+<div class="row">
 
-                    <div class="line">
+🌐 Public IP:
+<b>${m.public_ip}</b>
 
-                        🌐 Public IP:
+</div>
 
-                        <b>
-                            ${escapeHtml(
-                                machine.public_ip
-                            )}
-                        </b>
+<div class="row">
 
-                    </div>
+🕒 Last Seen:
+<b>${m.last_seen}</b>
 
+</div>
 
-                    <div class="line">
+<div class="row">
 
-                        🕒 Last Seen:
+⏱️ Heartbeat:
+<b>
+${m.seconds_since_last_heartbeat}
+giây trước
+</b>
 
-                        <b>
-                            ${machine.last_seen}
-                        </b>
+</div>
 
-                    </div>
+<div class="row">
 
+📨 Telegram Offline:
+<b>
+${
+    m.offline_notified
+    ? "ĐÃ GỬI"
+    : "CHƯA GỬI"
+}
+</b>
 
-                    <div class="line">
+</div>
 
-                        ⏱️ Heartbeat:
+</div>
 
-                        <b>
-                            ${seconds}
-                            giây trước
-                        </b>
+`;
 
-                    </div>
+        }
 
-                </div>
-
-            `;
-
-        });
-
-
-        machineList.innerHTML =
-            html;
-
+        document
+            .getElementById(
+                "machines"
+            )
+            .innerHTML = html;
 
     }
-    catch(error){
+    catch (error) {
 
-        console.error(error);
+        console.log(error);
 
     }
 
 }
 
-
-loadStatus();
+loadData();
 
 setInterval(
-    loadStatus,
+    loadData,
     1000
 );
 
@@ -850,35 +867,36 @@ setInterval(
 </html>
 """
 
-
-@app.route("/", methods=["GET"])
-def home():
-
     return render_template_string(
-        HTML
+        html
     )
 
 
-# ============================================================
+# =========================================================
 # START WATCHDOG
-# ============================================================
+# =========================================================
 
 watchdog_thread = threading.Thread(
+
     target=watchdog,
+
     daemon=True
+
 )
 
 watchdog_thread.start()
 
 
-# ============================================================
+# =========================================================
 # LOCAL RUN
-# ============================================================
+# =========================================================
 
 if __name__ == "__main__":
 
     app.run(
+
         host="0.0.0.0",
-        port=5000,
-        debug=False
+
+        port=5000
+
     )
