@@ -18,47 +18,62 @@ app = Flask(__name__)
 # TIMEZONE VIETNAM
 # ============================================================
 
-VIETNAM_TZ = timezone(
-    timedelta(hours=7)
-)
+VIETNAM_TZ = timezone(timedelta(hours=7))
 
 
 def vietnam_now():
+
     return datetime.now(VIETNAM_TZ)
 
 
 def format_time(dt):
-    return dt.strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-# Lấy từ Render Environment
 BOT_TOKEN = os.environ.get(
     "BOT_TOKEN",
     ""
-)
+).strip()
+
 
 CHAT_ID = os.environ.get(
     "CHAT_ID",
     ""
-)
+).strip()
 
 
-# Client gửi heartbeat mỗi 10 giây
 HEARTBEAT_INTERVAL = 10
 
-
-# Không nhận heartbeat đủ 30 giây => OFFLINE
 OFFLINE_TIMEOUT = 30
 
-
-# Watchdog kiểm tra mỗi 1 giây
 CHECK_INTERVAL = 1
+
+
+# ============================================================
+# CHECK ENVIRONMENT
+# ============================================================
+
+print("=" * 60)
+print("NETWORK MONITOR SERVER")
+print(
+    "BOT_TOKEN:",
+    "OK" if BOT_TOKEN else "EMPTY"
+)
+print(
+    "CHAT_ID:",
+    CHAT_ID if CHAT_ID else "EMPTY"
+)
+print(
+    "OFFLINE_TIMEOUT:",
+    OFFLINE_TIMEOUT,
+    "seconds"
+)
+print("=" * 60)
 
 
 # ============================================================
@@ -97,7 +112,7 @@ def send_telegram(message):
     try:
 
         url = (
-            "https://api.telegram.org/"
+            f"https://api.telegram.org/"
             f"bot{BOT_TOKEN}/sendMessage"
         )
 
@@ -117,10 +132,17 @@ def send_telegram(message):
 
 
         print(
-            "📱 Telegram:",
-            response.status_code,
-            response.text
+            "📱 TELEGRAM:",
+            response.status_code
         )
+
+
+        if not response.ok:
+
+            print(
+                "❌ TELEGRAM RESPONSE:",
+                response.text
+            )
 
 
         return response.ok
@@ -129,7 +151,7 @@ def send_telegram(message):
     except Exception as ex:
 
         print(
-            "❌ Telegram ERROR:",
+            "❌ TELEGRAM ERROR:",
             ex
         )
 
@@ -152,18 +174,22 @@ def heartbeat():
 
 
     machine_name = str(
+
         data.get(
             "machine_name",
             "Unknown"
         )
+
     ).strip()
 
 
     public_ip = str(
+
         data.get(
             "public_ip",
             "Unknown"
         )
+
     ).strip()
 
 
@@ -174,14 +200,20 @@ def heartbeat():
 
     now = vietnam_now()
 
+    should_send_online = False
+
+    online_message = ""
+
 
     with machines_lock:
+
 
         # ====================================================
         # MÁY MỚI
         # ====================================================
 
         if machine_name not in machines:
+
 
             machines[machine_name] = {
 
@@ -191,20 +223,20 @@ def heartbeat():
 
                 "public_ip": public_ip,
 
-                "offline_alert_sent": False,
-
                 "offline_since": None
 
             }
 
 
             print(
-                f"🟢 NEW MACHINE: "
+                f"🆕 NEW MACHINE: "
                 f"{machine_name}"
             )
 
 
-            # Gửi ONLINE lần đầu
+            should_send_online = True
+
+
             online_message = (
 
                 "🟢 MÁY ĐÃ ONLINE\n\n"
@@ -221,18 +253,12 @@ def heartbeat():
             )
 
 
-            # Gửi sau khi nhả lock
-            should_send_online = True
-
-
         else:
+
 
             machine = machines[
                 machine_name
             ]
-
-
-            should_send_online = False
 
 
             # =================================================
@@ -241,14 +267,14 @@ def heartbeat():
 
             if not machine["online"]:
 
-                offline_since = (
-                    machine.get(
-                        "offline_since"
-                    )
+
+                offline_since = machine.get(
+                    "offline_since"
                 )
 
 
                 if offline_since:
+
 
                     offline_duration = int(
 
@@ -260,6 +286,7 @@ def heartbeat():
 
                     )
 
+
                 else:
 
                     offline_duration = 0
@@ -267,13 +294,10 @@ def heartbeat():
 
                 machine["online"] = True
 
-                machine[
-                    "offline_alert_sent"
-                ] = False
+                machine["offline_since"] = None
 
-                machine[
-                    "offline_since"
-                ] = None
+
+                should_send_online = True
 
 
                 online_message = (
@@ -295,9 +319,6 @@ def heartbeat():
                 )
 
 
-                should_send_online = True
-
-
             # =================================================
             # UPDATE HEARTBEAT
             # =================================================
@@ -308,7 +329,7 @@ def heartbeat():
 
 
     # ========================================================
-    # Gửi Telegram ngoài lock
+    # GỬI TELEGRAM NGOÀI LOCK
     # ========================================================
 
     if should_send_online:
@@ -330,7 +351,7 @@ def heartbeat():
 
 
 # ============================================================
-# STATUS API
+# API STATUS
 # ============================================================
 
 @app.route(
@@ -346,10 +367,8 @@ def api_status():
 
     with machines_lock:
 
-        for (
-            name,
-            machine
-        ) in machines.items():
+
+        for name, machine in machines.items():
 
 
             seconds = int(
@@ -363,18 +382,15 @@ def api_status():
             )
 
 
-            # =================================================
-            # QUAN TRỌNG:
-            # TÍNH ONLINE/OFFLINE TRỰC TIẾP
-            # =================================================
+            status = (
 
-            if seconds >= OFFLINE_TIMEOUT:
+                "OFFLINE"
 
-                status = "OFFLINE"
+                if seconds >= OFFLINE_TIMEOUT
 
-            else:
+                else "ONLINE"
 
-                status = "ONLINE"
+            )
 
 
             result[name] = {
@@ -412,7 +428,7 @@ def api_status():
 
 
 # ============================================================
-# ROOT
+# DASHBOARD
 # ============================================================
 
 @app.route(
@@ -433,8 +449,7 @@ def dashboard():
 
 <meta
     name="viewport"
-    content="width=device-width,
-             initial-scale=1.0"
+    content="width=device-width, initial-scale=1.0"
 >
 
 <title>
@@ -445,13 +460,17 @@ Network Monitor
 <style>
 
 * {
-    box-sizing: border-box;
+
+    box-sizing:
+        border-box;
+
 }
 
 
 body {
 
-    margin: 0;
+    margin:
+        0;
 
     font-family:
         Arial,
@@ -521,17 +540,6 @@ body {
 }
 
 
-.server-running {
-
-    color:
-        #16a34a;
-
-    font-weight:
-        bold;
-
-}
-
-
 .machine-grid {
 
     display:
@@ -565,8 +573,7 @@ body {
         rgba(0,0,0,.08);
 
     border-left:
-        7px solid
-        #16a34a;
+        7px solid #16a34a;
 
 }
 
@@ -574,8 +581,7 @@ body {
 .machine.offline {
 
     border-left:
-        7px solid
-        #dc2626;
+        7px solid #dc2626;
 
 }
 
@@ -645,8 +651,7 @@ body {
         12px 0;
 
     border-bottom:
-        1px solid
-        #e5e7eb;
+        1px solid #e5e7eb;
 
 }
 
@@ -681,7 +686,6 @@ body {
 
 }
 
-
 </style>
 
 </head>
@@ -702,40 +706,21 @@ body {
 
 <div class="server-info">
 
-    <div>
+    ☁️ Server:
+    <b>🟢 RUNNING</b>
 
-        ☁️ Server:
+    <br><br>
 
-        <span
-            class="server-running"
-        >
-
-            🟢 RUNNING
-
-        </span>
-
-    </div>
-
-
-    <div
-        id="serverTime"
-        style="margin-top:10px;"
-    >
+    <span id="serverTime">
 
         Loading...
 
-    </div>
+    </span>
 
+    <br><br>
 
-    <div
-        style="margin-top:10px;"
-    >
-
-        🔴 Offline timeout:
-
-        <b>30 giây</b>
-
-    </div>
+    🔴 Offline timeout:
+    <b>30 giây</b>
 
 </div>
 
@@ -771,10 +756,10 @@ async function loadStatus() {
 
     try {
 
-        const response =
-            await fetch(
-                "/api/status"
-            );
+
+        const response = await fetch(
+            "/api/status"
+        );
 
 
         const data =
@@ -813,6 +798,7 @@ async function loadStatus() {
             names.length === 0
         ) {
 
+
             grid.innerHTML = `
 
                 <div class="empty">
@@ -822,6 +808,7 @@ async function loadStatus() {
                 </div>
 
             `;
+
 
             return;
 
@@ -855,6 +842,7 @@ async function loadStatus() {
                     "
                 >
 
+
                     <div
                         class="machine-name"
                     >
@@ -887,7 +875,9 @@ async function loadStatus() {
                         🌐 Public IP:
 
                         <b>
+
                             ${machine.public_ip}
+
                         </b>
 
                     </div>
@@ -898,7 +888,9 @@ async function loadStatus() {
                         🕒 Last Seen:
 
                         <b>
+
                             ${machine.last_seen}
+
                         </b>
 
                     </div>
@@ -909,8 +901,10 @@ async function loadStatus() {
                         ⏱️ Heartbeat:
 
                         <b>
+
                             ${machine.seconds_since_last_heartbeat}
                             giây trước
+
                         </b>
 
                     </div>
@@ -923,13 +917,13 @@ async function loadStatus() {
         }
 
 
-        grid.innerHTML =
-            html;
+        grid.innerHTML = html;
 
 
     }
 
     catch (error) {
+
 
         console.error(
             error
@@ -972,15 +966,17 @@ def watchdog():
 
     while True:
 
+
         try:
 
-            now = vietnam_now()
 
+            now = vietnam_now()
 
             machines_to_notify = []
 
 
             with machines_lock:
+
 
                 for (
                     machine_name,
@@ -1011,8 +1007,7 @@ def watchdog():
 
                         and
 
-                        seconds >=
-                        OFFLINE_TIMEOUT
+                        seconds >= OFFLINE_TIMEOUT
 
                     ):
 
@@ -1023,19 +1018,8 @@ def watchdog():
 
 
                         machine[
-                            "offline_alert_sent"
-                        ] = True
-
-
-                        machine[
                             "offline_since"
                         ] = now
-
-
-                        last_seen =
-                            machine[
-                                "last_seen"
-                            ]
 
 
                         machines_to_notify.append({
@@ -1052,7 +1036,9 @@ def watchdog():
                                 seconds,
 
                             "last_seen":
-                                last_seen,
+                                machine[
+                                    "last_seen"
+                                ],
 
                             "offline_time":
                                 now
@@ -1060,9 +1046,9 @@ def watchdog():
                         })
 
 
-            # ====================================================
-            # Gửi Telegram ngoài lock
-            # ====================================================
+            # ================================================
+            # SEND TELEGRAM
+            # ================================================
 
             for info in machines_to_notify:
 
@@ -1096,8 +1082,11 @@ def watchdog():
 
 
                 print(
+
                     f"🔴 OFFLINE: "
-                    f"{info['machine_name']}"
+                    f"{info['machine_name']} "
+                    f"({info['seconds']}s)"
+
                 )
 
 
@@ -1107,6 +1096,7 @@ def watchdog():
 
 
         except Exception as ex:
+
 
             print(
                 "❌ WATCHDOG ERROR:",
@@ -1131,7 +1121,6 @@ watchdog_thread = threading.Thread(
 
 )
 
-
 watchdog_thread.start()
 
 
@@ -1152,19 +1141,7 @@ if __name__ == "__main__":
 
 
     print(
-        "🚀 NETWORK MONITOR SERVER STARTED"
-    )
-
-
-    print(
-        f"⏱️ Offline timeout: "
-        f"{OFFLINE_TIMEOUT}s"
-    )
-
-
-    print(
-        f"🔎 Watchdog check: "
-        f"{CHECK_INTERVAL}s"
+        "🚀 SERVER STARTED"
     )
 
 
