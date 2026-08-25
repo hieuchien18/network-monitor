@@ -4,7 +4,7 @@ import threading
 from datetime import datetime
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template_string
 
 
 app = Flask(__name__)
@@ -14,12 +14,14 @@ app = Flask(__name__)
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = os.getenv("8508756103:AAGBFPaboWOaIxaCOf-W46PRBoeSDyiDcZ4", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
 
-CHAT_ID = os.getenv("6149566675", "")
+# Client gửi heartbeat mỗi 10 giây
+# Quá 30 giây không nhận được -> OFFLINE
+OFFLINE_TIMEOUT = 30
 
-OFFLINE_TIMEOUT = 60
-
+# Server kiểm tra mỗi 5 giây
 CHECK_INTERVAL = 5
 
 
@@ -31,14 +33,14 @@ machines = {}
 
 
 # ============================================================
-# TELEGRAM
+# SEND TELEGRAM
 # ============================================================
 
 def send_telegram(message):
 
     if not BOT_TOKEN or not CHAT_ID:
 
-        print("BOT_TOKEN hoặc CHAT_ID chưa được cấu hình")
+        print("❌ BOT_TOKEN hoặc CHAT_ID chưa được cấu hình")
 
         return False
 
@@ -50,16 +52,20 @@ def send_telegram(message):
         )
 
         response = requests.post(
+
             url,
+
             json={
                 "chat_id": CHAT_ID,
                 "text": message
             },
+
             timeout=15
         )
 
         print(
-            "Telegram:",
+            "📱 Telegram:",
+            response.status_code,
             response.text
         )
 
@@ -68,7 +74,7 @@ def send_telegram(message):
     except Exception as ex:
 
         print(
-            "Telegram Error:",
+            "❌ Telegram Error:",
             ex
         )
 
@@ -76,7 +82,7 @@ def send_telegram(message):
 
 
 # ============================================================
-# HEARTBEAT API
+# HEARTBEAT
 # ============================================================
 
 @app.route("/heartbeat", methods=["POST"])
@@ -85,6 +91,7 @@ def heartbeat():
     data = request.get_json(
         silent=True
     ) or {}
+
 
     machine_name = data.get(
         "machine_name",
@@ -96,11 +103,13 @@ def heartbeat():
         "Unknown"
     )
 
+
     now = datetime.now()
 
-    # --------------------------------------------
-    # MÁY MỚI
-    # --------------------------------------------
+
+    # --------------------------------------------------------
+    # MÁY CHƯA TỒN TẠI
+    # --------------------------------------------------------
 
     if machine_name not in machines:
 
@@ -110,28 +119,34 @@ def heartbeat():
 
             "online": True,
 
-            "public_ip": public_ip
+            "public_ip": public_ip,
+
+            "offline_alert_sent": False
 
         }
 
+
         print(
-            f"[NEW MACHINE] {machine_name}"
+            f"🟢 NEW MACHINE: "
+            f"{machine_name}"
         )
+
 
         send_telegram(
-            f"""
-🟢 MÁY ĐÃ ONLINE
 
-🖥️ Máy:
-{machine_name}
+            f"🟢 MÁY ĐÃ ONLINE\n\n"
 
-🌐 Public IP:
-{public_ip}
+            f"🖥️ Máy:\n"
+            f"{machine_name}\n\n"
 
-🕒 Thời gian:
-{now.strftime("%Y-%m-%d %H:%M:%S")}
-"""
+            f"🌐 Public IP:\n"
+            f"{public_ip}\n\n"
+
+            f"🕒 Thời gian:\n"
+            f"{now.strftime('%Y-%m-%d %H:%M:%S')}"
+
         )
+
 
     else:
 
@@ -139,28 +154,35 @@ def heartbeat():
             machine_name
         ]
 
-        # ----------------------------------------
-        # OFFLINE → ONLINE LẠI
-        # ----------------------------------------
+
+        # ----------------------------------------------------
+        # OFFLINE -> ONLINE
+        # ----------------------------------------------------
 
         if not machine["online"]:
 
             machine["online"] = True
 
+            machine[
+                "offline_alert_sent"
+            ] = False
+
+
             send_telegram(
-                f"""
-🟢 MÁY ĐÃ ONLINE TRỞ LẠI
 
-🖥️ Máy:
-{machine_name}
+                f"🟢 MÁY ĐÃ ONLINE TRỞ LẠI\n\n"
 
-🌐 Public IP:
-{public_ip}
+                f"🖥️ Máy:\n"
+                f"{machine_name}\n\n"
 
-🕒 Thời gian:
-{now.strftime("%Y-%m-%d %H:%M:%S")}
-"""
+                f"🌐 Public IP:\n"
+                f"{public_ip}\n\n"
+
+                f"🕒 Thời gian:\n"
+                f"{now.strftime('%Y-%m-%d %H:%M:%S')}"
+
             )
+
 
         machine["last_seen"] = now
 
@@ -181,42 +203,64 @@ def heartbeat():
 
 
 # ============================================================
-# VIEW STATUS
+# API STATUS
 # ============================================================
 
-@app.route("/", methods=["GET"])
-def home():
+@app.route("/api/status", methods=["GET"])
+def api_status():
 
     result = {}
 
     now = datetime.now()
 
+
     for name, machine in machines.items():
 
         seconds = int(
+
             (
                 now
-                - machine["last_seen"]
+                -
+                machine["last_seen"]
             ).total_seconds()
+
         )
+
+
+        status = (
+
+            "ONLINE"
+
+            if machine["online"]
+
+            else
+
+            "OFFLINE"
+
+        )
+
 
         result[name] = {
 
-            "status":
-                "ONLINE"
-                if machine["online"]
-                else "OFFLINE",
+            "status": status,
 
             "last_seen":
-                machine["last_seen"].strftime(
+
+                machine[
+                    "last_seen"
+                ].strftime(
                     "%Y-%m-%d %H:%M:%S"
                 ),
 
             "seconds_since_last_heartbeat":
+
                 seconds,
 
             "public_ip":
-                machine["public_ip"]
+
+                machine[
+                    "public_ip"
+                ]
 
         }
 
@@ -236,9 +280,7 @@ def home():
 
 def watchdog():
 
-    print(
-        "Watchdog started"
-    )
+    print("🐕 WATCHDOG STARTED")
 
     while True:
 
@@ -246,23 +288,35 @@ def watchdog():
 
             now = datetime.now()
 
-            for machine_name, machine in list(
+
+            for (
+                machine_name,
+                machine
+            ) in list(
                 machines.items()
             ):
+
 
                 seconds_offline = int(
 
                     (
+
                         now
-                        - machine["last_seen"]
+
+                        -
+
+                        machine[
+                            "last_seen"
+                        ]
+
                     ).total_seconds()
 
                 )
 
 
-                # --------------------------------
-                # MẤT KẾT NỐI
-                # --------------------------------
+                # ------------------------------------------------
+                # QUÁ 30 GIÂY KHÔNG CÓ HEARTBEAT
+                # ------------------------------------------------
 
                 if (
 
@@ -271,55 +325,64 @@ def watchdog():
                     and
 
                     seconds_offline
-                    >= OFFLINE_TIMEOUT
+                    >=
+                    OFFLINE_TIMEOUT
 
                 ):
-
-                    machine["online"] = False
-
-
-                    offline_time = (
-                        machine["last_seen"]
-                    )
 
 
                     print(
 
-                        f"[OFFLINE] "
+                        f"🔴 MACHINE OFFLINE: "
                         f"{machine_name}"
 
                     )
 
 
+                    machine[
+                        "online"
+                    ] = False
+
+
+                    machine[
+                        "offline_alert_sent"
+                    ] = True
+
+
+                    last_seen = machine[
+                        "last_seen"
+                    ]
+
+
                     send_telegram(
-                        f"""
-🔴 CẢNH BÁO MÁY OFFLINE
 
-🖥️ Máy:
-{machine_name}
+                        f"🔴 CẢNH BÁO MÁY OFFLINE\n\n"
 
-🌐 Public IP cuối:
-{machine["public_ip"]}
+                        f"🖥️ Máy:\n"
+                        f"{machine_name}\n\n"
 
-📡 Không nhận heartbeat quá:
-{OFFLINE_TIMEOUT} giây
+                        f"🌐 Public IP cuối:\n"
+                        f"{machine['public_ip']}\n\n"
 
-🕒 Lần cuối online:
-{offline_time.strftime("%Y-%m-%d %H:%M:%S")}
+                        f"📡 Không nhận heartbeat:\n"
+                        f"{seconds_offline} giây\n\n"
 
-⚠️ Có thể:
-• Mất Internet
-• Tắt Wi-Fi/LAN
-• Máy bị tắt
-• Tool client bị dừng
-"""
+                        f"🕒 Lần cuối Online:\n"
+                        f"{last_seen.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+
+                        f"⚠️ Có thể do:\n"
+                        f"• Mất Internet\n"
+                        f"• Tắt Wi-Fi/LAN\n"
+                        f"• Máy tính bị tắt\n"
+                        f"• Client.py bị dừng"
+
                     )
 
 
         except Exception as ex:
 
             print(
-                "Watchdog Error:",
+                "❌ WATCHDOG ERROR:",
                 ex
             )
 
@@ -327,6 +390,314 @@ def watchdog():
         time.sleep(
             CHECK_INTERVAL
         )
+
+
+# ============================================================
+# DASHBOARD
+# ============================================================
+
+@app.route("/", methods=["GET"])
+def dashboard():
+
+    return render_template_string("""
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>Network Monitor</title>
+
+<style>
+
+body {
+
+    margin: 0;
+
+    font-family:
+        Arial,
+        sans-serif;
+
+    background:
+        #f3f4f6;
+
+}
+
+
+header {
+
+    background:
+        #111827;
+
+    color:
+        white;
+
+    padding:
+        20px;
+
+    font-size:
+        24px;
+
+    font-weight:
+        bold;
+
+}
+
+
+.container {
+
+    max-width:
+        1100px;
+
+    margin:
+        auto;
+
+    padding:
+        30px;
+
+}
+
+
+.grid {
+
+    display:
+        grid;
+
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(300px, 1fr)
+        );
+
+    gap:
+        20px;
+
+}
+
+
+.card {
+
+    background:
+        white;
+
+    border-radius:
+        15px;
+
+    padding:
+        25px;
+
+    box-shadow:
+        0 4px 15px
+        rgba(0,0,0,.08);
+
+}
+
+
+.online {
+
+    border-left:
+        6px solid green;
+
+}
+
+
+.offline {
+
+    border-left:
+        6px solid red;
+
+}
+
+
+.status {
+
+    font-size:
+        20px;
+
+    font-weight:
+        bold;
+
+}
+
+
+</style>
+
+</head>
+
+<body>
+
+<header>
+
+📡 NETWORK MONITOR
+
+</header>
+
+
+<div class="container">
+
+    <div
+        class="grid"
+        id="machines"
+    >
+
+        Loading...
+
+    </div>
+
+</div>
+
+
+<script>
+
+async function loadData() {
+
+    try {
+
+        const response =
+            await fetch(
+                "/api/status"
+            );
+
+        const data =
+            await response.json();
+
+        const machines =
+            data.machines;
+
+        let html = "";
+
+
+        for (
+            const name
+            in machines
+        ) {
+
+            const machine =
+                machines[name];
+
+            const status =
+                machine.status;
+
+            const css =
+                status === "ONLINE"
+
+                ?
+
+                "online"
+
+                :
+
+                "offline";
+
+
+            html += `
+
+            <div
+                class="
+                    card
+                    ${css}
+                "
+            >
+
+                <h2>
+                    🖥️ ${name}
+                </h2>
+
+                <p
+                    class="status"
+                >
+                    ${status === "ONLINE"
+
+                        ?
+
+                        "🟢 ONLINE"
+
+                        :
+
+                        "🔴 OFFLINE"
+                    }
+                </p>
+
+                <p>
+                    🌐 IP:
+                    ${machine.public_ip}
+                </p>
+
+                <p>
+                    🕒 Last Seen:
+                    ${machine.last_seen}
+                </p>
+
+                <p>
+                    ⏱️
+                    ${machine.seconds_since_last_heartbeat}
+                    seconds ago
+                </p>
+
+            </div>
+
+            `;
+
+        }
+
+
+        if (
+            html === ""
+        ) {
+
+            html =
+                "<h2>Chưa có máy nào kết nối</h2>";
+
+        }
+
+
+        document.getElementById(
+            "machines"
+        ).innerHTML =
+            html;
+
+
+    }
+
+    catch (
+        error
+    ) {
+
+        console.log(
+            error
+        );
+
+    }
+
+}
+
+
+loadData();
+
+
+setInterval(
+
+    loadData,
+
+    5000
+
+);
+
+</script>
+
+</body>
+
+</html>
+
+""")
 
 
 # ============================================================
@@ -356,6 +727,7 @@ if __name__ == "__main__":
         )
 
     )
+
 
     app.run(
 
